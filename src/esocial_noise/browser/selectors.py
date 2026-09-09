@@ -17,7 +17,7 @@ class SelectorRegistry:
             raise KeyError(f"Selector inexistente: {key}")
         return self.definitions[key]
 
-    def first_visible(self, page: Page, key: str, timeout_ms: int = 3500) -> Locator:
+    def first_visible(self, page: Page, key: str, timeout_ms: int = 15000) -> Locator:
         definition = self.definition(key)
         for option in [definition.get("primary", {})] + definition.get("fallbacks", []):
             serialized = json.dumps(option, ensure_ascii=False)

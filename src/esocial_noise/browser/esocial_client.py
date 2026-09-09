@@ -17,6 +17,11 @@ from .selectors import SelectorRegistry
 SST_WORKERS_URL = "https://frontend.esocial.gov.br/sst/gestaoTrabalhadores"
 ESOCIAL_LOGIN_URL = "https://login.esocial.gov.br/login.aspx"
 SESSION_RENEWAL_TEXT = "Sua sessÃ£o vai expirar em breve"
+GENERIC_LOADING_MARKERS = (
+    "aguarde um momento",
+    "carregando",
+    "processando",
+)
 
 
 class ESocialClient:
@@ -297,12 +302,15 @@ class ESocialClient:
         self.execution.current_step = "noise_information_checked"
         self.click("sst.noise_section")
         self.page.wait_for_timeout(900)
+        self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=30000)
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
             event_date = self._open_exposure_event_for_date("")
         if not event_date:
             raise SafetyBlocked("Nao encontrei evento de Condicoes Ambientais para verificar agentes nocivos.")
+        self._wait_exposure_detail_loaded(timeout_ms=45000)
+        self._wait_agent_section_ready(timeout_ms=45000)
         agent_list_text = self.page.locator("body").inner_text(timeout=5000)
         has_noise_agent_in_list = bool(re.search(r"\b02\.01\.001\b", agent_list_text))
         if has_noise_agent_in_list:
@@ -410,7 +418,7 @@ class ESocialClient:
         print(f"Clicando: {selector_key}", flush=True)
         before = self.evidence.capture(self.page, f"before_{selector_key}", include_dom=False)
         self.execution.event("action_started", action=self.execution.last_action, evidence=before)
-        locator.click(timeout=5000)
+        locator.click(timeout=15000)
         self.page.wait_for_timeout(500)
         after = self.evidence.capture(self.page, f"after_{selector_key}", include_dom=False)
         self.execution.event("action_completed", action=self.execution.last_action, evidence=after)
@@ -483,6 +491,25 @@ class ESocialClient:
                 return
             self.page.wait_for_timeout(700)
 
+    def _wait_while_generic_loading(self, context: str, timeout_ms: int = 30000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        saw_loading = False
+        while time.monotonic() < deadline:
+            self.renew_session_if_prompted()
+            try:
+                body = normalize_text(self.page.locator("body").inner_text(timeout=1500))
+            except Exception:
+                self.page.wait_for_timeout(500)
+                continue
+            if not any(marker in body for marker in GENERIC_LOADING_MARKERS):
+                if saw_loading:
+                    self.page.wait_for_timeout(500)
+                return
+            saw_loading = True
+            print(f"Aguardando {context} carregar...", flush=True)
+            self.page.wait_for_timeout(800)
+        raise SafetyBlocked(f"{context} nao terminou de carregar dentro do tempo esperado.")
+
     def _type_masked_document(self, field: Any, value_to_type: str, expected_digits: str, label: str) -> None:
         """Digita em campos mascarados/autocomplete sem usar fill(), que pode ser limpo pelo React."""
         expected_digits = "".join(filter(str.isdigit, expected_digits))
@@ -506,52 +533,102 @@ class ESocialClient:
     def _open_exposure_event_for_date(self, expected_date: str) -> str:
         self.renew_session_if_prompted()
         date = (expected_date or "").strip()
+        deadline = time.monotonic() + 35
         if not date:
             print("Data da planilha vazia; usando primeiro evento de condicao ambiental disponivel.", flush=True)
-            row = self.page.locator("tr", has_text=re.compile(r"\b(0[1-9]|[12]\d|3[01])/(0[1-9]|1[0-2])/\d{4}\b")).filter(has=self.page.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I))).first
         else:
             print(f"Selecionando evento de condicao ambiental da data: {date}", flush=True)
-            row = self.page.locator("tr", has_text=date).first
-        try:
-            if row.count() == 0 or not row.is_visible(timeout=1500):
-                print(f"Nenhum evento de condicao ambiental encontrado para a data {date}.", flush=True)
-                return ""
-            row_text = row.inner_text(timeout=2000)
-            clicked_date = self._first_date(row_text) or date
-            view = row.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I)).first
-            if view.count() != 1:
-                print("Botao 'visualizar evento' nao ficou unico na linha da data.", flush=True)
-                return ""
-            view.click(timeout=5000)
-            self.page.wait_for_timeout(1200)
-            self.assert_session_active()
-            self._wait_exposure_detail_loaded()
-            print(f"Evento de condicao ambiental aberto: {clicked_date}", flush=True)
-            return clicked_date
-        except PlaywrightTimeoutError:
-            return ""
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            self.renew_session_if_prompted()
+            self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=8000)
+            if not date:
+                row = self.page.locator("tr", has_text=re.compile(r"\b(0[1-9]|[12]\d|3[01])/(0[1-9]|1[0-2])/\d{4}\b")).filter(has=self.page.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I))).first
+            else:
+                row = self.page.locator("tr", has_text=date).filter(has=self.page.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I))).first
+            try:
+                if row.count() == 0 or not row.is_visible(timeout=800):
+                    print("Evento ainda nao apareceu na lista; aguardando...", flush=True)
+                    self.page.wait_for_timeout(1200)
+                    continue
+                row.scroll_into_view_if_needed(timeout=3000)
+                row_text = row.inner_text(timeout=3000)
+                clicked_date = self._first_date(row_text) or date
+                view = row.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I)).first
+                if view.count() != 1:
+                    print("Botao 'visualizar evento' ainda nao estabilizou na linha; aguardando...", flush=True)
+                    self.page.wait_for_timeout(1200)
+                    continue
+                view.click(timeout=7000)
+                self.page.wait_for_timeout(1200)
+                self.assert_session_active()
+                self._wait_exposure_detail_loaded(timeout_ms=45000)
+                print(f"Evento de condicao ambiental aberto: {clicked_date}", flush=True)
+                return clicked_date
+            except (PlaywrightTimeoutError, SafetyBlocked) as error:
+                last_error = error
+                print("Evento ainda nao respondeu; repetindo tentativa apos carregar.", flush=True)
+                self.page.wait_for_timeout(1500)
+        if last_error:
+            print(f"Nao consegui abrir evento no tempo esperado: {last_error}", flush=True)
+        return ""
 
     def _wait_exposure_detail_loaded(self, timeout_ms: int = 20000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             self.assert_session_active()
             try:
-                body = normalize_text(self.page.locator("body").inner_text(timeout=2000))
-                if "aguarde um momento" not in body and "agentes nocivos" in body and "identificacao do trabalhador" in body:
+                raw_body = self.page.locator("body").inner_text(timeout=2500)
+                body = normalize_text(raw_body)
+                if any(marker in body for marker in GENERIC_LOADING_MARKERS):
+                    print("Aguardando detalhe das condicoes ambientais carregar...", flush=True)
+                elif "agentes nocivos" in body and "identificacao do trabalhador" in body:
                     return
             except Exception:
                 pass
             self.page.wait_for_timeout(700)
         raise SafetyBlocked("A tela de detalhes das Condicoes Ambientais nao terminou de carregar.")
 
+    def _wait_agent_section_ready(self, timeout_ms: int = 30000) -> None:
+        """Evita concluir 'sem ruido' enquanto a tabela de agentes ainda estÃ¡ renderizando."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            self.assert_session_active()
+            try:
+                raw_body = self.page.locator("body").inner_text(timeout=2500)
+                body = normalize_text(raw_body)
+                if any(marker in body for marker in GENERIC_LOADING_MARKERS):
+                    print("Aguardando tabela de Agentes Nocivos carregar...", flush=True)
+                elif "agentes nocivos" in body and (
+                    re.search(r"\b\d{2}\.\d{2}\.\d{3}\b", raw_body)
+                    or "nao existe agente nocivo" in body
+                    or "nenhum agente nocivo" in body
+                    or "sem exposicao" in body
+                ):
+                    return
+                else:
+                    print("Tabela de Agentes Nocivos ainda nao estabilizou; aguardando...", flush=True)
+            except Exception:
+                pass
+            self.page.wait_for_timeout(900)
+        raise SafetyBlocked("A tabela de Agentes Nocivos nao terminou de carregar; nao vou marcar como sem ruido sem comprovar.")
+
     def _open_noise_agent_detail_if_present(self) -> bool:
         self.renew_session_if_prompted()
-        try:
-            body = self.page.locator("body").inner_text(timeout=5000)
-        except Exception:
-            return False
-        try:
-            if re.search(r"\b02\.01\.001\b", body):
+        deadline = time.monotonic() + 30
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            self._wait_agent_section_ready(timeout_ms=10000)
+            try:
+                body = self.page.locator("body").inner_text(timeout=5000)
+            except Exception as error:
+                last_error = error
+                self.page.wait_for_timeout(800)
+                continue
+            try:
+                if not re.search(r"\b02\.01\.001\b", body):
+                    print("Agente 02.01.001 nao apareceu; registrando como sem agente de ruido.", flush=True)
+                    return False
                 print("Abrindo detalhe do agente nocivo 02.01.001...", flush=True)
                 clicked = self.page.evaluate("""() => {
                     const rows = Array.from(document.querySelectorAll('tr'));
@@ -566,35 +643,34 @@ class ESocialClient:
                 if not clicked:
                     row = self.page.locator("tr", has_text=re.compile(r"02\.01\.001")).first
                     row.scroll_into_view_if_needed(timeout=2000)
-                    row.locator("button").first.click(timeout=5000)
-            else:
-                print("Agente 02.01.001 nao apareceu; registrando como sem agente de ruido.", flush=True)
-                return False
-            self.page.wait_for_timeout(1200)
-            try:
-                self.page.get_by_text(re.compile(r"Visualizar\s+Agente\s+Nocivo", re.I)).first.wait_for(state="visible", timeout=4000)
-            except PlaywrightTimeoutError:
-                pass
-            self._wait_noise_detail_loaded()
-            return True
-        except PlaywrightTimeoutError:
-            print("Nao foi possivel abrir o detalhe do agente; seguindo com os dados visiveis.", flush=True)
-            return False
+                    row.locator("button").first.click(timeout=7000)
+                self.page.wait_for_timeout(1200)
+                self._wait_noise_detail_loaded(timeout_ms=30000)
+                return True
+            except PlaywrightTimeoutError as error:
+                last_error = error
+                print("Detalhe do agente 02.01.001 ainda nao abriu; tentando novamente.", flush=True)
+                self.page.wait_for_timeout(1200)
+        print(f"Nao foi possivel abrir o detalhe do agente dentro do tempo esperado: {last_error}", flush=True)
+        return False
 
     def _wait_noise_detail_loaded(self, timeout_ms: int = 12000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             try:
                 body = normalize_text(self.page.locator("body").inner_text(timeout=2000))
-                if "visualizar agente nocivo" in body and (
+                if any(marker in body for marker in GENERIC_LOADING_MARKERS):
+                    print("Aguardando detalhe do agente nocivo carregar...", flush=True)
+                elif "visualizar agente nocivo" in body and (
                     "intensidade" in body or "nao existe agente nocivo" in body
                 ):
                     return
             except Exception:
                 pass
             self.page.wait_for_timeout(500)
+        raise SafetyBlocked("O detalhe do agente nocivo nao terminou de carregar.")
 
-    def _click_any(self, locators: list[Any], description: str, timeout_ms: int = 5000) -> None:
+    def _click_any(self, locators: list[Any], description: str, timeout_ms: int = 20000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         last_error: Exception | None = None
         while time.monotonic() < deadline:
@@ -608,7 +684,7 @@ class ESocialClient:
                             text = description
                         self.policy.assert_target_allowed(text or description, {"do_not_match_text": ["Excluir", "Transmitir", "Assinar", "Retificar"]})
                         print(f"Clicando: {description}", flush=True)
-                        locator.click(timeout=3000)
+                        locator.click(timeout=7000)
                         return
                 except Exception as error:
                     last_error = error
