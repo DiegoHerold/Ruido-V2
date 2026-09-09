@@ -288,7 +288,7 @@ class ESocialClient:
         self.execution.checkpoint("employee_found_or_not_found", "ok" if found or absent else "suspicious", {"cpf": mask_cpf(item.cpf)}, {"found": found, "not_found_signal": absent}, searched)
         if absent:
             return EmployeeResult(
-                cpf=item.cpf, nome=item.name, status_consulta="not_found", ruido_encontrado="nÃ£o",
+                cpf=item.cpf, nome=item.name, status_consulta="not_found", ruido_encontrado="não",
                 data_planilha=item.expected_start_date, intensidade_planilha=item.expected_intensity,
                 detalhe_observado="FuncionÃ¡rio nÃ£o encontrado no contexto da empresa.", evidencia_principal=searched[-1],
             )
@@ -330,8 +330,8 @@ class ESocialClient:
             status_consulta="completed" if compared else "inconclusive", ruido_encontrado=noise,
             data_planilha=item.expected_start_date, data_esocial=esocial_date, data_confere=date_matches,
             intensidade_planilha=item.expected_intensity, intensidade_esocial=esocial_intensity, intensidade_confere=intensity_matches,
-            detalhe_observado="NÃ£o hÃ¡ Agente de RuÃ­do" if noise == "nÃ£o" else detail or "InformaÃ§Ã£o do agente 02.01.001 nÃ£o pÃ´de ser comprovada.",
-            evidencia_principal=checked[-1], revisao_humana="nÃ£o" if compared else "sim",
+            detalhe_observado="Não há Agente de Ruído" if noise == "não" else detail or "Informação do agente 02.01.001 não pôde ser comprovada.",
+            evidencia_principal=checked[-1], revisao_humana="não" if compared else "sim",
         )
 
     @staticmethod
@@ -357,12 +357,18 @@ class ESocialClient:
 
     @staticmethod
     def _intensity(text: str) -> str:
-        label = "Intensidade, concentraÃ§Ã£o ou dose da exposiÃ§Ã£o"
-        position = text.casefold().find(label.casefold())
+        normalized = normalize_text(text)
+        match = re.search(
+            r"intensidade,\s*concentracao\s*ou\s*dose\s*da\s*exposicao.*?quantitativo\s+(\d+(?:[,.]\d+)?)\s+dose",
+            normalized,
+        )
+        if match:
+            return match.group(1).replace(",", ".")
+        position = normalized.find("intensidade")
         if position < 0:
             return ""
-        following = text[position + len(label):]
-        match = re.search(r"\n\s*(\d+(?:[,.]\d+)?)\b", following)
+        following = normalized[position:]
+        match = re.search(r"\b(\d+(?:[,.]\d+)?)\b\s+dose", following)
         return match.group(1).replace(",", ".") if match else ""
 
     @staticmethod
@@ -519,10 +525,24 @@ class ESocialClient:
             view.click(timeout=5000)
             self.page.wait_for_timeout(1200)
             self.assert_session_active()
+            self._wait_exposure_detail_loaded()
             print(f"Evento de condicao ambiental aberto: {clicked_date}", flush=True)
             return clicked_date
         except PlaywrightTimeoutError:
             return ""
+
+    def _wait_exposure_detail_loaded(self, timeout_ms: int = 20000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            self.assert_session_active()
+            try:
+                body = normalize_text(self.page.locator("body").inner_text(timeout=2000))
+                if "aguarde um momento" not in body and "agentes nocivos" in body and "identificacao do trabalhador" in body:
+                    return
+            except Exception:
+                pass
+            self.page.wait_for_timeout(700)
+        raise SafetyBlocked("A tela de detalhes das Condicoes Ambientais nao terminou de carregar.")
 
     def _open_noise_agent_detail_if_present(self) -> bool:
         self.renew_session_if_prompted()
@@ -555,10 +575,24 @@ class ESocialClient:
                 self.page.get_by_text(re.compile(r"Visualizar\s+Agente\s+Nocivo", re.I)).first.wait_for(state="visible", timeout=4000)
             except PlaywrightTimeoutError:
                 pass
+            self._wait_noise_detail_loaded()
             return True
         except PlaywrightTimeoutError:
             print("Nao foi possivel abrir o detalhe do agente; seguindo com os dados visiveis.", flush=True)
             return False
+
+    def _wait_noise_detail_loaded(self, timeout_ms: int = 12000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                body = normalize_text(self.page.locator("body").inner_text(timeout=2000))
+                if "visualizar agente nocivo" in body and (
+                    "intensidade" in body or "nao existe agente nocivo" in body
+                ):
+                    return
+            except Exception:
+                pass
+            self.page.wait_for_timeout(500)
 
     def _click_any(self, locators: list[Any], description: str, timeout_ms: int = 5000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
