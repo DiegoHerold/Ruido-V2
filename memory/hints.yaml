@@ -1,0 +1,17 @@
+version: 1
+hints:
+  - id: certificate_dialog_is_native
+    type: environment_variation
+    confidence: medium
+    applies_near: [certificate_login_completed]
+    note: 'O seletor de certificado pode abrir diálogo nativo. Usar OCR apenas para localizar a ocorrência única e exata de BIASON CONTABILIDADE e o botão OK; não capturar credenciais.'
+  - id: sst_labels_vary
+    type: visual_variation
+    confidence: low
+    applies_near: [noise_information_checked]
+    note: 'A área pode usar SST, Condições Ambientais, Agentes Nocivos ou Exposição Ocupacional. Confirmar por evidência antes de navegar.'
+  - id: wrong_company_causes_late_failures
+    type: possible_root_cause
+    confidence: high
+    applies_near: [employee_search_started, noise_information_checked]
+    note: 'Se a pesquisa ou SST falhar, validar antes a empresa representada ativa.'

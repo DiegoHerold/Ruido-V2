@@ -1,0 +1,109 @@
+schema_version: 1
+id: esocial.consulta_ruido
+name: Consulta de ruído ocupacional no eSocial
+version: 0.1.3
+description: Consulta somente leitura de informações de ruído/SST por CPF no eSocial Web.
+owner:
+  maintainer: automacoes
+runtime:
+  type: python-browser
+  python: '3.11+'
+  os: windows
+  session: interactive
+  browser:
+    channel: chrome
+    start_maximized: false
+    use_last_chrome_profile: true
+    close_all_instances_before_start: true
+    close_wait_seconds: 10
+application:
+  system: eSocial Web
+  base_url: https://www.gov.br/esocial/pt-br
+  sst_worker_management_url: https://frontend.esocial.gov.br/sst/gestaoTrabalhadores
+  entrypoint:
+    type: python-script
+    file: run.py
+execution:
+  timeout_seconds: 5400
+  session_renewal:
+    prompt_exact: 'Sua sessão vai expirar em breve'
+    confirmation_exact: 'SIM'
+    max_confirmation_attempts_per_prompt: 1
+  resume:
+    enabled: false
+    strategy: manual_after_human_review
+capabilities:
+  required: [browser.playwright, screenshot.capture, spreadsheet.read, ocr.desktop, desktop.controlled_click]
+  optional: [accessibility.snapshot]
+inputs:
+  required: [source_file]
+  properties:
+    source_file: {type: string, description: 'Excel .xlsx/.xls com coluna cpf'}
+    tipo_procuracao: {type: string, enum: ['Pessoa Jurídica', 'Pessoa Física'], description: 'Coluna por linha da planilha'}
+    cnpj_representado: {type: string, description: 'Obrigatório quando Tipo Procuração for Pessoa Jurídica'}
+    cpf_representado: {type: string, description: 'Obrigatório quando Tipo Procuração for Pessoa Física'}
+    ano: {type: string, description: 'Data de início da exposição em dd/mm/aaaa; coluna Ano da planilha'}
+    intensidade: {type: string, description: 'Intensidade esperada do agente nocivo'}
+noise_target:
+  agent_code: '02.01.001'
+  agent_name: 'Ruído'
+  source_date_column: 'Ano'
+  source_intensity_column: 'Intensidade'
+  comparison: exact_numeric_and_date
+outputs:
+  artifacts: [events.jsonl, checkpoints.json, evidence_bundle, report.csv, report.xlsx, report.md]
+steps:
+  - id: spreadsheet_loaded
+    checkpoint: spreadsheet_loaded
+  - id: browser_opened
+    checkpoint: browser_opened
+  - id: esocial_loaded
+    checkpoint: esocial_loaded
+  - id: certificate_login_completed
+    checkpoint: certificate_login_completed
+  - id: represented_company_selected
+    checkpoint: represented_company_selected
+  - id: employee_consultation
+    checkpoints: [employee_search_started, employee_found_or_not_found, noise_information_checked, employee_result_recorded]
+  - id: final_report_generated
+    checkpoint: final_report_generated
+selectors:
+  file: selectors.json
+  allow_runtime_patch: true
+  patch_requires_validation: true
+knowledge:
+  hints_file: memory/hints.yaml
+  learned_findings_file: memory/learned-findings.yaml
+  patch_history_file: memory/patch-history.yaml
+self_healing:
+  enabled: true
+  deterministic_first: true
+  ai_diagnosis_enabled: false
+  max_attempts_per_step: 2
+  max_total_attempts: 5
+  allowed_patch_types: [selector_patch, wait_tuning, popup_close, text_alias]
+  forbidden_auto_actions: [transmit, rectify, delete, alter_data, sign, final_submit, change_company, credential_action]
+policy:
+  mode: read_only
+  block_write_actions: true
+  require_human_for: [certificate_mismatch, captcha, mfa, company_mismatch, cpf_mismatch, unknown_screen, high_risk]
+  max_ai_calls_per_run: 1
+  max_ai_input_tokens_per_run: 12000
+  max_ai_output_tokens_per_run: 1500
+  max_ai_cost_usd_per_run: 0.25
+artifacts:
+  root: artifacts
+  output_root: output
+  capture_screenshots: true
+  capture_dom: true
+  capture_accessibility: true
+  redact_personal_data_in_events: true
+certificate_ocr:
+  enabled: true
+  flow: deterministic_certificate_login_v1
+  allow_direct_authenticated_return: true
+  certificate_subject_exact: BIASON CONTABILIDADE
+  confirmation_button_exact: ''
+  pre_ocr_human_wait_seconds: 1
+  timeout_seconds: 45
+  post_selection_wait_seconds: 25

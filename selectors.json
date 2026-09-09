@@ -1,0 +1,51 @@
+{
+  "portal.esocial_access": {
+    "kind": "link", "risk": "low",
+    "primary": {"engine": "css", "css": "a[href*='login.esocial.gov.br']"},
+    "fallbacks": [{"engine": "text", "contains": "Acesse o eSocial"}, {"engine": "text", "contains": "Acesse"}],
+    "validation": {"url_or_text_any": ["login.esocial.gov.br", "Entrar com gov.br"]},
+    "do_not_match_text": ["Entrar com gov.br", "Rejeitar cookies", "Aceitar cookies"]
+  },
+  "login.govbr": {
+    "kind": "button", "risk": "low",
+    "primary": {"engine": "playwright", "role": "button", "name": "Entrar com gov.br"},
+    "fallbacks": [{"engine": "text", "contains": "Entrar com"}],
+    "validation": {"url_or_text_any": ["sso.acesso.gov.br", "Identifique-se no gov.br"]},
+    "do_not_match_text": ["Senha", "Criar conta"]
+  },
+  "govbr.certificate": {
+    "kind": "button", "risk": "medium",
+    "primary": {"engine": "playwright", "role": "button", "name": "Seu certificado digital"},
+    "fallbacks": [{"engine": "text", "contains": "certificado digital"}],
+    "validation": {"desktop_dialog_expected": "Selecione um certificado"},
+    "do_not_match_text": ["certificado digital em nuvem", "Senha", "Criar conta"]
+  },
+  "company.switcher": {
+    "kind": "button", "risk": "high",
+    "primary": {"engine": "playwright", "role": "button", "name": "Trocar perfil"},
+    "fallbacks": [{"engine": "text", "contains": "Procuração"}],
+    "validation": {"visible_text_any": ["Procuração", "Representado"]},
+    "do_not_match_text": ["Cadastrar", "Alterar", "Excluir"]
+  },
+  "employee.search": {
+    "kind": "textbox", "risk": "low",
+    "primary": {"engine": "playwright", "label": "CPF"},
+    "fallbacks": [{"engine": "playwright", "placeholder": "CPF"}, {"engine": "accessibility", "role": "textbox", "name": "CPF"}],
+    "validation": {"value_matches_input": true},
+    "do_not_match_text": []
+  },
+  "employee.search_submit": {
+    "kind": "button", "risk": "low",
+    "primary": {"engine": "playwright", "role": "button", "name": "Pesquisar"},
+    "fallbacks": [{"engine": "text", "contains": "Consultar"}],
+    "validation": {"visible_text_any": ["Resultado", "Trabalhador", "Nenhum registro"]},
+    "do_not_match_text": ["Enviar", "Transmitir", "Excluir", "Retificar", "Assinar"]
+  },
+  "sst.noise_section": {
+    "kind": "link", "risk": "low",
+    "primary": {"engine": "playwright", "text": "Condições Ambientais"},
+    "fallbacks": [{"engine": "text", "contains": "SST"}, {"engine": "text", "contains": "Agentes Nocivos"}],
+    "validation": {"visible_text_any": ["Ruído", "Agente nocivo", "Exposição"]},
+    "do_not_match_text": ["Enviar", "Transmitir", "Alterar", "Excluir", "Retificar", "Assinar"]
+  }
+}

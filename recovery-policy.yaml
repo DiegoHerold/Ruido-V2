@@ -1,0 +1,53 @@
+version: 1
+mode: read_only
+limits:
+  max_attempts_per_step: 2
+  max_total_attempts: 5
+  max_recovery_seconds: 90
+  max_ai_calls: 1
+allowed_auto_recovery:
+  - wait_for_loading
+  - retry_read_only_selector
+  - use_declared_fallback_selector
+  - close_verified_low_risk_popup
+  - capture_more_evidence
+  - create_candidate_selector_patch
+  - select_exact_certificate_by_ocr
+requires_human:
+  - certificate_not_uniquely_identified
+  - captcha_or_mfa
+  - unknown_screen
+  - company_mismatch
+  - cpf_mismatch
+  - permission_issue
+  - business_validation_failed
+  - ai_low_confidence
+blocked_actions:
+  - transmit
+  - enviar
+  - envio_definitivo
+  - retificar
+  - excluir
+  - alterar
+  - assinar
+  - salvar
+  - change_company
+  - credential_capture
+dangerous_text:
+  - Transmitir
+  - Enviar
+  - Envio definitivo
+  - Retificar
+  - Excluir
+  - Alterar
+  - Assinar
+ai_response_schema:
+  classification: selector_changed | popup_blocking | timing_issue | wrong_context | employee_not_found | no_noise_info | business_validation_failed | unknown_screen | previous_step_suspicious
+  probable_root_cause_step: string
+  is_last_action_root_cause: boolean
+  diagnosis: string
+  confidence: number
+  recommended_recovery: object
+  required_validation: array
+  risk: low | medium | high
+  requires_human: boolean

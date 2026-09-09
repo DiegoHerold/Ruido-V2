@@ -1,0 +1,9 @@
+.env
+artifacts/
+output/
+__pycache__/
+.pytest_cache/
+.tmp-preview/
+.chrome-automation-profile/
+examples/*.inspect.ndjson
+*.pyc

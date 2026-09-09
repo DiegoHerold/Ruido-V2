@@ -1,0 +1,18 @@
+version: 1
+capture:
+  important_action_minimum_types: 2
+  on_step_start: [url, page_title]
+  on_action: [screenshot, visible_text, url, page_title]
+  on_failure: [screenshot, visible_text, dom_snapshot, accessibility_tree, url, page_title, selectors_tried, timeline, checkpoints]
+  certificate_ocr_action: [desktop_screenshot, ocr_words, active_window_title]
+  include_spreadsheet_row: true
+redaction:
+  event_cpf: mask_last_4
+  screenshot_contains_personal_data: restricted
+  patterns: [password, senha, token, cookie, authorization, certificado, private_key]
+retention:
+  local_days: 30
+  delete_after_days: 30
+artifacts:
+  evidence_directory: artifacts
+  allowed_extensions: [.png, .txt, .html, .json, .jsonl, .csv, .xlsx, .md]
