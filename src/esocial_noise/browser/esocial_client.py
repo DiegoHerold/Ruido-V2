@@ -102,20 +102,62 @@ class ESocialClient:
         self.execution.event("session_renewal_confirmed", evidence=after)
         return True
 
-    def return_to_worker_management(self, represented_document: str) -> None:
+    def return_to_worker_management(self, item: EmployeeInput, retry_representation: bool = True) -> None:
         """Retorna ao ponto de busca sem relogar nem trocar o contexto jÃ¡ validado."""
+        represented_document = item.represented_document
         self.execution.current_step = "employee_search_started"
         self._close_open_dialogs()
         before = self.evidence.capture(self.page, "before_return_to_worker_management", include_dom=False)
         self.execution.event("action_started", action="navigate:sst_worker_management", evidence=before)
         self.page.goto(self.sst_workers_url, wait_until="domcontentloaded", timeout=30000)
-        self.page.wait_for_timeout(1000)
-        text = self.page.locator("body").inner_text(timeout=5000)
-        document_visible = represented_document in "".join(filter(str.isdigit, text))
-        page_ready = "gestao de trabalhadores" in normalize_text(text) or "empregados" in normalize_text(text)
+        # O frontend do SST termina de montar o cabeÃ§alho (onde fica o CNPJ/CPF
+        # representado) depois do DOMContentLoaded. Uma leitura Ãºnica logo apÃ³s
+        # a navegaÃ§Ã£o criava falsos bloqueios em retornos mais lentos.
+        deadline = time.monotonic() + 15
+        text = ""
+        document_visible = False
+        page_ready = False
+        while time.monotonic() < deadline:
+            try:
+                text = self.page.locator("body").inner_text(timeout=1500)
+            except PlaywrightTimeoutError:
+                text = ""
+            digits = "".join(filter(str.isdigit, text))
+            normalized = normalize_text(text)
+            document_visible = represented_document in digits
+            page_ready = (
+                "gestao de trabalhadores" in normalized
+                or "gestao de empregados" in normalized
+            ) and "cpf completo" in normalized
+            if page_ready and document_visible:
+                break
+            self.page.wait_for_timeout(250)
         after = self.evidence.capture(self.page, "after_return_to_worker_management", include_dom=False)
         self.execution.event("action_completed", action="navigate:sst_worker_management", evidence=after)
         if not page_ready or not document_visible:
+            self.execution.checkpoint(
+                "represented_context_after_return",
+                "suspicious",
+                {"document": represented_document},
+                {"page_ready": page_ready, "document_visible": document_visible, "url": self.page.url},
+                after,
+            )
+            if retry_representation:
+                # A falta do documento pode ser uma renderizaÃ§Ã£o incompleta ou
+                # um contexto de procuraÃ§Ã£o perdido pelo portal. Revalida a
+                # procuraÃ§Ã£o da prÃ³pria linha uma vez antes de bloquear.
+                print("CNPJ/CPF representado nao confirmado; refazendo a troca de procuracao...", flush=True)
+                self.execution.event(
+                    "represented_context_recovery_started",
+                    document=represented_document,
+                    type=item.representation_type,
+                    evidence=after,
+                )
+                self.page.goto("https://www.esocial.gov.br/portal/Home/Inicial", wait_until="domcontentloaded", timeout=30000)
+                self.page.wait_for_timeout(800)
+                self.switch_representation(item)
+                self.return_to_worker_management(item, retry_representation=False)
+                return
             raise SafetyBlocked("O retorno Ã  GestÃ£o de Trabalhadores nÃ£o comprovou o mesmo CNPJ/CPF representado.")
 
     def switch_representation(self, item: EmployeeInput) -> None:
@@ -220,7 +262,8 @@ class ESocialClient:
                 except Exception:
                     return
 
-    def _ensure_worker_search_ready(self, represented_document: str) -> None:
+    def _ensure_worker_search_ready(self, item: EmployeeInput) -> None:
+        represented_document = item.represented_document
         self._close_open_dialogs()
         try:
             text = self.page.locator("body").inner_text(timeout=4000)
@@ -236,7 +279,7 @@ class ESocialClient:
         if ready:
             return
         print("Tela de busca de CPF nao estava pronta; retornando para Gestao de Empregados.", flush=True)
-        self.return_to_worker_management(represented_document)
+        self.return_to_worker_management(item)
 
     def _is_sst_frontend_loaded(self) -> bool:
         current_url = self.page.url.casefold()
@@ -277,7 +320,7 @@ class ESocialClient:
         self.execution.current_cpf, self.execution.current_step = item.cpf, "employee_search_started"
         print(f"Consultando CPF linha {item.source_row}: {mask_cpf(item.cpf)}", flush=True)
         self.renew_session_if_prompted()
-        self._ensure_worker_search_ready(item.represented_document)
+        self._ensure_worker_search_ready(item)
         start = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_search_start", include_dom=False)
         self.execution.checkpoint("employee_search_started", "ok", {"cpf": mask_cpf(item.cpf)}, {"source_row": item.source_row, "source_name": item.name}, start)
         field = self.selectors.first_visible(self.page, "employee.search")
@@ -303,6 +346,24 @@ class ESocialClient:
         self.click("sst.noise_section")
         self.page.wait_for_timeout(900)
         self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=30000)
+        if self._has_no_environmental_conditions_registered():
+            print("Trabalhador sem Condicoes Ambientais registradas; registrando sem agente de ruido.", flush=True)
+            checked = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_no_environmental_conditions", include_dom=False)
+            self.execution.checkpoint(
+                "noise_information_checked",
+                "ok",
+                {"section": "SST/noise", "agent_code": "02.01.001"},
+                {"noise": "não", "reason": "no_environmental_conditions_registered"},
+                checked,
+            )
+            return EmployeeResult(
+                cpf=item.cpf, nome=item.name,
+                status_consulta="completed", ruido_encontrado="não",
+                data_planilha=item.expected_start_date, data_esocial="", data_confere="",
+                intensidade_planilha=item.expected_intensity, intensidade_esocial="", intensidade_confere="",
+                detalhe_observado="Não há Condições Ambientais do Trabalho - Agentes Nocivos registradas para o trabalhador; Não há Agente de Ruído",
+                evidencia_principal=checked[-1], revisao_humana="não",
+            )
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
@@ -509,6 +570,16 @@ class ESocialClient:
             print(f"Aguardando {context} carregar...", flush=True)
             self.page.wait_for_timeout(800)
         raise SafetyBlocked(f"{context} nao terminou de carregar dentro do tempo esperado.")
+
+    def _has_no_environmental_conditions_registered(self) -> bool:
+        try:
+            body = normalize_text(self.page.locator("body").inner_text(timeout=3000))
+        except Exception:
+            return False
+        return (
+            "nao ha condicoes ambientais do trabalho" in body
+            and "agentes nocivos registradas para o(a) trabalhador(a)" in body
+        )
 
     def _type_masked_document(self, field: Any, value_to_type: str, expected_digits: str, label: str) -> None:
         """Digita em campos mascarados/autocomplete sem usar fill(), que pode ser limpo pelo React."""

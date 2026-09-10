@@ -429,14 +429,14 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 if context_safe and same_context:
                     # O CNPJ/CPF representado já foi validado: não refaz login nem troca perfil.
-                    client.return_to_worker_management(employee.represented_document)
+                    client.return_to_worker_management(employee)
                 elif context_safe and next_employee:
                     # Nunca consulta a próxima linha com o CNPJ anterior ainda ativo.
                     execution.event("represented_context_change_required", representation_type=next_employee.representation_type)
                     page.goto("https://www.esocial.gov.br/portal/Home/Inicial", wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_timeout(800)
                     client.switch_representation(next_employee)
-                    client.return_to_worker_management(next_employee.represented_document)
+                    client.return_to_worker_management(next_employee)
             write_reports(rows, execution, root, started, costs.total_usd)
             execution.event("execution_succeeded", rows=len(rows), output=str(execution.output_dir))
             print(f"Concluído. Relatórios: {execution.output_dir}")
