@@ -20,6 +20,10 @@ class SafetyBlocked(RuntimeError):
     """Uma regra imutável de consulta impediu a execução."""
 
 
+class RepresentationContextNotConfirmed(SafetyBlocked):
+    """A tela SST nao comprovou o documento; o runner decide a recuperacao."""
+
+
 class OCRSafetyBlocked(SafetyBlocked):
     """O diálogo nativo não forneceu evidência OCR suficiente para um clique seguro."""
 

@@ -18,7 +18,7 @@ from .browser.esocial_client import ESOCIAL_LOGIN_URL, ESocialClient
 from .browser.profile import clear_browser_auth_state, close_all_chrome_instances, mirrored_last_chrome_profile, open_debug_chrome
 from .browser.selectors import SelectorRegistry
 from .config import Settings
-from .contracts import EmployeeResult, OCRSafetyBlocked
+from .contracts import EmployeeResult, OCRSafetyBlocked, RepresentationContextNotConfirmed, SafetyBlocked
 from .desktop.certificate_ocr import CertificateOCR
 from .healing.failure import collect_failure, persist_bundle
 from .healing.ai_diagnosis import diagnose_if_enabled
@@ -337,9 +337,8 @@ def run(argv: list[str] | None = None) -> int:
                     raise RuntimeError("Entre no portal do eSocial antes de pressionar ENTER. A tela atual ainda nao comprova login ativo.")
                 print("Trocando perfil por procuracao conforme a primeira linha da planilha...", flush=True)
                 client.switch_representation(employees[0])
-                print(f"Abrindo Gestao de Trabalhadores: {settings.manifest['application']['sst_worker_management_url']}", flush=True)
-                page.goto(settings.manifest["application"]["sst_worker_management_url"], wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1200)
+                print(f"Confirmando Gestao de Trabalhadores: {settings.manifest['application']['sst_worker_management_url']}", flush=True)
+                client.return_to_worker_management(employees[0])
                 if not _manual_login_ready(page):
                     files = evidence.capture(page, "manual_login_not_reused", include_dom=False)
                     execution.checkpoint(
@@ -374,6 +373,24 @@ def run(argv: list[str] | None = None) -> int:
                     _complete_certificate_login(client, execution, evidence, settings)
                 client.select_company(args.company, args.company_cnpj)
             context_safe = True
+            representation_recovery_attempts: dict[tuple[str, str], int] = {}
+
+            def return_with_representation_recovery(item) -> None:
+                try:
+                    client.return_to_worker_management(item)
+                    return
+                except RepresentationContextNotConfirmed as error:
+                    context_key = (item.representation_type, item.represented_document)
+                    attempt = representation_recovery_attempts.get(context_key, 0)
+                    if not policy.recovery_allowed("retry_representation_context", attempt):
+                        raise SafetyBlocked("A recuperacao de contexto de procuracao ja foi usada ou nao esta autorizada.") from error
+                    attempt += 1
+                    representation_recovery_attempts[context_key] = attempt
+                    try:
+                        client.retry_representation_context(item, attempt, str(error))
+                    except RepresentationContextNotConfirmed as retry_error:
+                        execution.event("represented_context_recovery_exhausted", "error", attempt=attempt, error=str(retry_error))
+                        raise SafetyBlocked("A segunda validacao do contexto de procuracao falhou; revisao humana necessaria.") from retry_error
             for index, employee in enumerate(employees):
                 if not context_safe:
                     rows.append(EmployeeResult(
@@ -384,6 +401,19 @@ def run(argv: list[str] | None = None) -> int:
                     state.record(rows[-1], context_trusted=False)
                     continue
                 try:
+                    result = client.inspect_employee(employee)
+                except RepresentationContextNotConfirmed as error:
+                    context_key = (employee.representation_type, employee.represented_document)
+                    attempt = representation_recovery_attempts.get(context_key, 0)
+                    if not policy.recovery_allowed("retry_representation_context", attempt):
+                        raise SafetyBlocked("A recuperacao de contexto de procuracao ja foi usada ou nao esta autorizada.") from error
+                    attempt += 1
+                    representation_recovery_attempts[context_key] = attempt
+                    try:
+                        client.retry_representation_context(employee, attempt, str(error))
+                    except RepresentationContextNotConfirmed as retry_error:
+                        execution.event("represented_context_recovery_exhausted", "error", attempt=attempt, error=str(retry_error))
+                        raise SafetyBlocked("A segunda validacao do contexto de procuracao falhou; revisao humana necessaria.") from retry_error
                     result = client.inspect_employee(employee)
                 except Exception as error:
                     bundle = collect_failure(page, execution, evidence, error, root)
@@ -429,14 +459,14 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 if context_safe and same_context:
                     # O CNPJ/CPF representado já foi validado: não refaz login nem troca perfil.
-                    client.return_to_worker_management(employee)
+                    return_with_representation_recovery(employee)
                 elif context_safe and next_employee:
                     # Nunca consulta a próxima linha com o CNPJ anterior ainda ativo.
                     execution.event("represented_context_change_required", representation_type=next_employee.representation_type)
                     page.goto("https://www.esocial.gov.br/portal/Home/Inicial", wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_timeout(800)
                     client.switch_representation(next_employee)
-                    client.return_to_worker_management(next_employee)
+                    return_with_representation_recovery(next_employee)
             write_reports(rows, execution, root, started, costs.total_usd)
             execution.event("execution_succeeded", rows=len(rows), output=str(execution.output_dir))
             print(f"Concluído. Relatórios: {execution.output_dir}")

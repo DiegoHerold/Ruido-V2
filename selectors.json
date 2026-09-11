@@ -47,5 +47,56 @@
     "fallbacks": [{"engine": "text", "contains": "SST"}, {"engine": "text", "contains": "Agentes Nocivos"}],
     "validation": {"visible_text_any": ["Ruído", "Agente nocivo", "Exposição"]},
     "do_not_match_text": ["Enviar", "Transmitir", "Alterar", "Excluir", "Retificar", "Assinar"]
+  },
+  "sst.exposure_event_view": {
+    "kind": "button", "risk": "low",
+    "primary": {"engine": "css", "css": "button[aria-label='visualizar evento']"},
+    "fallbacks": [{"engine": "playwright", "role": "button", "name": "visualizar evento"}],
+    "validation": {"visible_text_any": ["Agentes Nocivos"]},
+    "do_not_match_text": ["Enviar", "Transmitir", "Alterar", "Excluir", "Retificar", "Assinar"]
+  },
+  "sst.noxious_agent_view": {
+    "kind": "button", "risk": "low",
+    "primary": {"engine": "css", "css": "button[aria-label='visualizar item']"},
+    "fallbacks": [{"engine": "playwright", "role": "button", "name": "visualizar item"}],
+    "validation": {"visible_text_any": ["Visualizar Agente Nocivo", "Intensidade"]},
+    "do_not_match_text": ["Enviar", "Transmitir", "Alterar", "Excluir", "Retificar", "Assinar"]
+  },
+  "representation.switch": {
+    "kind": "button", "risk": "low",
+    "primary": {"engine": "playwright", "text": "Trocar Perfil/MÃ³dulo"},
+    "fallbacks": [{"engine": "text", "contains": "Trocar perfil"}],
+    "validation": {"visible_text_any": ["Selecione o seu perfil", "Procurador de Pessoa JurÃ­dica", "Procurador de Pessoa FÃ­sica"]},
+    "do_not_match_text": ["Cadastrar", "Alterar", "Excluir"]
+  },
+  "representation.profile": {
+    "kind": "select", "risk": "low",
+    "primary": {"engine": "css", "css": "#perfilAcesso"},
+    "fallbacks": [{"engine": "playwright", "label": "Perfil de acesso"}],
+    "validation": {"visible_text_any": ["Pessoa JurÃ­dica", "Pessoa FÃ­sica"]}, "do_not_match_text": []
+  },
+  "representation.document_pj": {
+    "kind": "textbox", "risk": "low", "primary": {"engine": "css", "css": "#procuradorCnpj"},
+    "fallbacks": [{"engine": "playwright", "label": "CNPJ"}], "validation": {"value_matches_input": true}, "do_not_match_text": []
+  },
+  "representation.document_pf": {
+    "kind": "textbox", "risk": "low", "primary": {"engine": "css", "css": "#procuradorCpf"},
+    "fallbacks": [{"engine": "playwright", "label": "CPF"}], "validation": {"value_matches_input": true}, "do_not_match_text": []
+  },
+  "representation.verify_pj": {
+    "kind": "button", "risk": "low", "primary": {"engine": "css", "css": "#btn-verificar-procuracao-cnpj"},
+    "fallbacks": [{"engine": "text", "contains": "Verificar"}], "validation": {"visible_text_any": ["SST", "MÃ³dulo"]}, "do_not_match_text": []
+  },
+  "representation.verify_pf": {
+    "kind": "button", "risk": "low", "primary": {"engine": "css", "css": "#btn-verificar-procuracao-cpf"},
+    "fallbacks": [{"engine": "text", "contains": "Verificar"}], "validation": {"visible_text_any": ["SST", "MÃ³dulo"]}, "do_not_match_text": []
+  },
+  "representation.sst_module": {
+    "kind": "button", "risk": "low", "primary": {"engine": "css", "css": "#sst"},
+    "fallbacks": [{"engine": "text", "contains": "SeguranÃ§a e SaÃºde no Trabalho"}], "validation": {"url_or_text_any": ["frontend.esocial.gov.br/sst", "MÃ³dulo Simplificado"]}, "do_not_match_text": []
+  },
+  "representation.continue": {
+    "kind": "button", "risk": "low", "primary": {"engine": "css", "css": "#btnProcuracao"},
+    "fallbacks": [{"engine": "text", "contains": "Continuar"}], "validation": {"url_or_text_any": ["frontend.esocial.gov.br/sst", "GestÃ£o de Empregados"]}, "do_not_match_text": []
   }
 }
