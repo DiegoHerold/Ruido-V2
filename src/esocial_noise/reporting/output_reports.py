@@ -28,7 +28,7 @@ def write_reports(rows: list[EmployeeResult], execution: ExecutionContext, root:
               "status": "completed_with_review" if any(row.revisao_humana == "sim" for row in rows) else "completed", "processed": len(rows), "successes": counts.get("completed", 0), "not_found": counts.get("not_found", 0), "inconclusive": counts.get("inconclusive", 0), "errors": counts.get("error", 0) + counts.get("human_review_required", 0), "human_review": sum(row.revisao_humana == "sim" for row in rows),
               "checkpoints": "\n".join(f"- {item['checkpoint']}: {item['status']}" for item in execution.checkpoints) or "- nenhum", "healing": f"- Tentativas: {execution.recovery_attempts}\n- Chamadas IA: {execution.ai_calls}\n- Custo IA: USD {ai_cost_usd:.6f}",
               "employee_rows": "\n".join(
-                  f"- {row.cpf}: {row.status_consulta}; agente 02.01.001: {row.ruido_encontrado}; "
+                  f"- {row.cpf}: {row.status_consulta}; agente: {row.codigo_agente or '—'}; ruido: {row.ruido_encontrado}; "
                   f"data: {row.data_esocial or 'não lida'} / {row.data_planilha} ({row.data_confere or 'pendente'}); "
                   f"intensidade: {row.intensidade_esocial or 'não lida'} / {row.intensidade_planilha} ({row.intensidade_confere or 'pendente'}); "
                   f"revisão: {row.revisao_humana}"

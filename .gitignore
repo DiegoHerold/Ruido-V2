@@ -7,3 +7,4 @@ __pycache__/
 .chrome-automation-profile/
 examples/*.inspect.ndjson
 *.pyc
+node_modules/

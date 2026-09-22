@@ -25,7 +25,7 @@ from .healing.ai_diagnosis import diagnose_if_enabled
 from .healing.knowledge import find_hypotheses
 from .healing.recovery import deterministic_retry
 from .healing.root_cause import analyze
-from .reporting.input_excel import load_employees, mark_source_row_completed, prepare_output_workbook
+from .reporting.input_excel import load_employees, mark_source_rows_completed, prepare_output_workbook
 from .reporting.output_reports import write_reports
 from .runtime.artifacts import BrowserEvidence
 from .runtime.execution import ExecutionContext
@@ -90,33 +90,17 @@ def _wait_for_chrome_cdp(port: int, timeout_seconds: int = 8) -> bool:
     return False
 
 
-def _save_employee_output(input_workbook: Path, output_workbook: Path, employee_row: int, result: EmployeeResult) -> Path:
+def _save_employee_output(input_workbook: Path, output_workbook: Path, employee_row: int, results: list[EmployeeResult]) -> Path:
+    """Grava os resultados de um funcionario na planilha de saida.
+
+    Quando ha mais de um agente nocivo, insere linhas extras logo abaixo da linha original.
+    O primeiro resultado (indice 0) atualiza a linha existente; os demais sao inseridos abaixo.
+    """
     output_workbook.parent.mkdir(parents=True, exist_ok=True)
     if not output_workbook.exists():
         print(f"Planilha de resultado nao encontrada; recriando copia: {output_workbook}", flush=True)
         output_workbook = prepare_output_workbook(input_workbook, output_workbook.parent)
-    has_noise = result.ruido_encontrado.strip().casefold() == "sim"
-    is_final = has_noise or result.status_consulta in {"completed", "not_found"}
-    status = "Concluido" if is_final else "Revisao"
-    if has_noise:
-        log_text = "Agente de Ruído encontrado"
-        agent_code = "02.01.001"
-    elif is_final:
-        log_text = "Não há Agente de Ruído"
-        agent_code = ""
-    else:
-        log_text = result.detalhe_observado or result.erro or "Revisão humana necessária"
-        agent_code = ""
-    saved_path = mark_source_row_completed(
-        output_workbook,
-        employee_row,
-        no_noise=not has_noise,
-        esocial_date=result.data_esocial or result.data_planilha,
-        esocial_intensity=result.intensidade_esocial,
-        agent_code=agent_code,
-        log_text=log_text,
-        status=status,
-    )
+    saved_path = mark_source_rows_completed(output_workbook, employee_row, results)
     if saved_path != output_workbook:
         print(f"Planilha principal estava bloqueada; continuando em: {saved_path}", flush=True)
     return saved_path
@@ -384,18 +368,20 @@ def run(argv: list[str] | None = None) -> int:
                     state.record(rows[-1], context_trusted=False)
                     continue
                 try:
-                    result = client.inspect_employee(employee)
+                    result_list = client.inspect_employee(employee)
                 except Exception as error:
                     bundle = collect_failure(page, execution, evidence, error, root)
                     bundle["knowledge"] = find_hypotheses(root, execution)
                     persist_bundle(bundle, root)
                     if deterministic_retry(page, selectors, policy, evidence, execution):
                         try:
-                            rows.append(client.inspect_employee(employee))
-                            output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, rows[-1])
-                            state.record(rows[-1], context_trusted=True)
+                            result_list = client.inspect_employee(employee)
+                            rows.extend(result_list)
+                            output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, result_list)
+                            for r in result_list:
+                                state.record(r, context_trusted=True)
                             execution.current_step = "employee_result_recorded"
-                            execution.checkpoint("employee_result_recorded", "ok", {"cpf": mask_cpf(employee.cpf)}, {"status": rows[-1].status_consulta, "recovered": True}, [rows[-1].evidencia_principal] if rows[-1].evidencia_principal else [])
+                            execution.checkpoint("employee_result_recorded", "ok", {"cpf": mask_cpf(employee.cpf)}, {"status": result_list[0].status_consulta, "recovered": True, "agents": len(result_list)}, [result_list[0].evidencia_principal] if result_list[0].evidencia_principal else [])
                             continue
                         except Exception as retry_error:
                             error = retry_error
@@ -407,21 +393,25 @@ def run(argv: list[str] | None = None) -> int:
                                 diagnosis = ai_diagnosis
                         except Exception as ai_error:
                             execution.event("ai_call_completed", "error", error=str(ai_error))
-                    rows.append(EmployeeResult(
+                    error_result = EmployeeResult(
                         cpf=employee.cpf, nome=employee.name, status_consulta="human_review_required" if diagnosis.requires_human else "error", ruido_encontrado="inconclusivo",
                         data_planilha=employee.expected_start_date, intensidade_planilha=employee.expected_intensity,
                         detalhe_observado=diagnosis.diagnosis, evidencia_principal=bundle["evidence"][0] if bundle["evidence"] else "",
                         erro=str(error), recuperacao=json.dumps(diagnosis.recommended_recovery, ensure_ascii=False),
                         houve_ia="sim" if execution.ai_calls else "não", revisao_humana="sim",
-                    ))
-                    output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, rows[-1])
+                    )
+                    rows.append(error_result)
+                    output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, [error_result])
+                    result_list = [error_result]
                     context_safe = True
                 else:
-                    rows.append(result)
-                    output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, result)
-                state.record(rows[-1], context_trusted=context_safe)
+                    rows.extend(result_list)
+                    output_workbook = _save_employee_output(args.input, output_workbook, employee.source_row, result_list)
+                for r in result_list:
+                    state.record(r, context_trusted=context_safe)
                 execution.current_step = "employee_result_recorded"
-                execution.checkpoint("employee_result_recorded", "ok", {"cpf": mask_cpf(employee.cpf)}, {"status": rows[-1].status_consulta}, [rows[-1].evidencia_principal] if rows[-1].evidencia_principal else [])
+                _last_result = rows[-1]
+                execution.checkpoint("employee_result_recorded", "ok", {"cpf": mask_cpf(employee.cpf)}, {"status": _last_result.status_consulta}, [_last_result.evidencia_principal] if _last_result.evidencia_principal else [])
                 next_employee = employees[index + 1] if index + 1 < len(employees) else None
                 same_context = next_employee and (
                     next_employee.representation_type == employee.representation_type

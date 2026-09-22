@@ -9,6 +9,7 @@ DIAGNOSIS_CLASSES = {
 }
 REPORT_COLUMNS = [
     "cpf", "nome", "status_consulta", "ruido_encontrado",
+    "codigo_agente",
     "data_planilha", "data_esocial", "data_confere",
     "intensidade_planilha", "intensidade_esocial", "intensidade_confere",
     "detalhe_observado", "evidencia_principal", "erro", "recuperacao",
@@ -67,6 +68,7 @@ class EmployeeResult:
     status_consulta: str
     ruido_encontrado: str
     detalhe_observado: str
+    codigo_agente: str = ""
     data_planilha: str = ""
     data_esocial: str = ""
     data_confere: str = ""

@@ -273,7 +273,7 @@ class ESocialClient:
         if not valid:
             raise SafetyBlocked("NÃ£o foi possÃ­vel provar a empresa representada ativa.")
 
-    def inspect_employee(self, item: EmployeeInput) -> EmployeeResult:
+    def inspect_employee(self, item: EmployeeInput) -> list[EmployeeResult]:
         self.execution.current_cpf, self.execution.current_step = item.cpf, "employee_search_started"
         print(f"Consultando CPF linha {item.source_row}: {mask_cpf(item.cpf)}", flush=True)
         self.renew_session_if_prompted()
@@ -292,55 +292,157 @@ class ESocialClient:
         searched = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_search_result", include_dom=False)
         self.execution.checkpoint("employee_found_or_not_found", "ok" if found or absent else "suspicious", {"cpf": mask_cpf(item.cpf)}, {"found": found, "not_found_signal": absent}, searched)
         if absent:
-            return EmployeeResult(
+            return [EmployeeResult(
                 cpf=item.cpf, nome=item.name, status_consulta="not_found", ruido_encontrado="não",
                 data_planilha=item.expected_start_date, intensidade_planilha=item.expected_intensity,
-                detalhe_observado="FuncionÃ¡rio nÃ£o encontrado no contexto da empresa.", evidencia_principal=searched[-1],
-            )
+                detalhe_observado="Funcionário não encontrado no contexto da empresa.", evidencia_principal=searched[-1],
+            )]
         if not found:
-            raise SafetyBlocked("Resultado da busca nÃ£o prova correspondÃªncia do CPF; consulta interrompida.")
+            raise SafetyBlocked("Resultado da busca não prova correspondência do CPF; consulta interrompida.")
         self.execution.current_step = "noise_information_checked"
         self.click("sst.noise_section")
         self.page.wait_for_timeout(900)
         self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=30000)
+        _NO_EVENT_MARKERS_INSPECT = (
+            "nao ha condicoes ambientais",
+            "nenhuma condicao ambiental",
+            "nao ha registros",
+            "nenhum registro",
+            "sem registros",
+            "nao ha condicao ambiental do trabalho",
+            "nao ha condicoes ambientais do trabalho",
+        )
+        try:
+            _page_body_now = normalize_text(self.page.locator("body").inner_text(timeout=3000))
+            _no_events_confirmed = any(m in _page_body_now for m in _NO_EVENT_MARKERS_INSPECT)
+        except Exception:
+            _no_events_confirmed = False
+        if _no_events_confirmed:
+            print("Pagina confirma ausencia de Condicoes Ambientais; registrando como sem agente nocivo.", flush=True)
+            self.execution.checkpoint("noise_information_checked", "ok", {"section": "SST/noise"}, {"noise": "não"}, [])
+            return [EmployeeResult(
+                cpf=item.cpf, nome=item.name,
+                status_consulta="completed", ruido_encontrado="não",
+                data_planilha=item.expected_start_date, intensidade_planilha=item.expected_intensity,
+                detalhe_observado="Não há Condições Ambientais do Trabalho registradas no eSocial.",
+                evidencia_principal="", revisao_humana="não",
+            )]
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
             event_date = self._open_exposure_event_for_date("")
         if not event_date:
+            try:
+                _body_final = normalize_text(self.page.locator("body").inner_text(timeout=3000))
+                _no_events_final = any(m in _body_final for m in _NO_EVENT_MARKERS_INSPECT)
+            except Exception:
+                _no_events_final = False
+            if _no_events_final:
+                print("Confirmado: nao ha Condicoes Ambientais cadastradas; registrando como sem agente nocivo.", flush=True)
+                self.execution.checkpoint("noise_information_checked", "ok", {"section": "SST/noise"}, {"noise": "não"}, [])
+                return [EmployeeResult(
+                    cpf=item.cpf, nome=item.name,
+                    status_consulta="completed", ruido_encontrado="não",
+                    data_planilha=item.expected_start_date, intensidade_planilha=item.expected_intensity,
+                    detalhe_observado="Não há Condições Ambientais do Trabalho registradas no eSocial.",
+                    evidencia_principal="", revisao_humana="não",
+                )]
             raise SafetyBlocked("Nao encontrei evento de Condicoes Ambientais para verificar agentes nocivos.")
         self._wait_exposure_detail_loaded(timeout_ms=45000)
         self._wait_agent_section_ready(timeout_ms=45000)
+
+        # Data do evento — lida antes de abrir os modais (inputs somem ao navegar para modal).
+        esocial_date = self._start_date_from_page() or event_date
+
         agent_list_text = self.page.locator("body").inner_text(timeout=5000)
-        has_noise_agent_in_list = bool(re.search(r"\b02\.01\.001\b", agent_list_text))
-        if has_noise_agent_in_list:
-            self._open_noise_agent_detail_if_present()
-        text = self.page.locator("body").inner_text(timeout=5000)
-        normalized = normalize_text(text)
-        # NÃ£o basta encontrar a palavra "ruÃ­do": a consulta sÃ³ Ã© positiva para o cÃ³digo oficial.
-        no_noise_proven = (
-            not has_noise_agent_in_list
-            or any(value in normalized for value in ("nao existe agente nocivo", "nenhum agente nocivo", "sem exposicao", "nao ha informacao"))
-        )
-        noise = "sim" if has_noise_agent_in_list or re.search(r"\b02\.01\.001\b", text) else "não" if no_noise_proven else "inconclusivo"
-        esocial_date = self._start_date_from_page() or event_date or self._first_date(text)
-        esocial_intensity = self._intensity(text)
-        date_matches = self._matches_date(item.expected_start_date, esocial_date)
-        intensity_matches = self._matches_intensity(item.expected_intensity, esocial_intensity)
+        has_any_agent_in_list = bool(re.search(r"\b\d{2}\.\d{2}\.\d{3}\b", agent_list_text))
+
+        # Abre o detalhe de cada agente e coleta dados estruturados.
+        agents: list[dict] = self._open_noise_agent_detail_if_present() if has_any_agent_in_list else []
+
         checked = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_noise", include_dom=False)
-        identified = esocial_date != "" and esocial_intensity != ""
-        mismatch = date_matches == "não" or intensity_matches == "não"
-        compared = noise in {"sim", "não"}
-        self.execution.checkpoint("noise_information_checked", "ok" if compared else "suspicious", {"section": "SST/noise", "agent_code": "02.01.001"}, {"noise": noise, "date_matches": date_matches, "intensity_matches": intensity_matches}, checked)
-        detail = " ".join(line.strip() for line in text.splitlines() if "02.01.001" in line or "intensidade" in normalize_text(line))[:1000]
-        return EmployeeResult(
-            cpf=item.cpf, nome=item.name,
-            status_consulta="completed" if compared else "inconclusive", ruido_encontrado=noise,
-            data_planilha=item.expected_start_date, data_esocial=esocial_date, data_confere=date_matches,
-            intensidade_planilha=item.expected_intensity, intensidade_esocial=esocial_intensity, intensidade_confere=intensity_matches,
-            detalhe_observado="Não há Agente de Ruído" if noise == "não" else detail or "Informação do agente 02.01.001 não pôde ser comprovada.",
-            evidencia_principal=checked[-1], revisao_humana="não" if compared else "sim",
+        evidence_file = checked[-1] if checked else ""
+
+        # Se nao abriu nenhum modal (agentes na lista mas nenhum acessivel), leia o texto atual da pagina.
+        if not agents:
+            page_text = self.page.locator("body").inner_text(timeout=5000)
+            page_norm = normalize_text(page_text)
+            has_noise_fallback = bool(re.search(r"\b02\.01\.001\b", page_text))
+            no_noise_fallback = not has_noise_fallback or any(
+                v in page_norm for v in ("nao existe agente nocivo", "nenhum agente nocivo", "sem exposicao")
+            )
+            noise_fallback = "sim" if has_noise_fallback else "não" if no_noise_fallback else "inconclusivo"
+            compared = noise_fallback in {"sim", "não"}
+            self.execution.checkpoint(
+                "noise_information_checked",
+                "ok" if compared else "suspicious",
+                {"section": "SST/noise"},
+                {"noise": noise_fallback, "agents": 0},
+                checked,
+            )
+            return [EmployeeResult(
+                cpf=item.cpf, nome=item.name,
+                status_consulta="completed" if compared else "inconclusive",
+                ruido_encontrado=noise_fallback,
+                data_planilha=item.expected_start_date, data_esocial=esocial_date,
+                data_confere=self._matches_date(item.expected_start_date, esocial_date),
+                intensidade_planilha=item.expected_intensity,
+                detalhe_observado="Não há Agente de Ruído" if noise_fallback == "não" else "Agentes na lista mas modais não acessíveis.",
+                evidencia_principal=evidence_file,
+                revisao_humana="não" if compared else "sim",
+            )]
+
+        # Constroi uma EmployeeResult por agente encontrado.
+        results: list[EmployeeResult] = []
+        agent_codes_found = [a["code"] for a in agents if a["code"]]
+        has_noise = any(a["is_noise"] for a in agents)
+        self.execution.checkpoint(
+            "noise_information_checked",
+            "ok",
+            {"section": "SST/noise", "agents": len(agents)},
+            {"noise": "sim" if has_noise else "não", "codes": agent_codes_found},
+            checked,
         )
+
+        for agent in agents:
+            code = agent["code"]
+            is_noise = agent["is_noise"]
+            description = agent["description"]
+            intensity = agent["intensity"]  # preenchida somente para 02.01.001
+            sem_agente = agent["sem_agente_nocivo"]
+
+            if is_noise:
+                ruido_encontrado = "sim"
+                detalhe = description or "Agente de Ruído 02.01.001"
+                date_matches = self._matches_date(item.expected_start_date, esocial_date)
+                intensity_matches = self._matches_intensity(item.expected_intensity, intensity)
+            else:
+                ruido_encontrado = "não"
+                detalhe = (
+                    "Não existe agente nocivo ou de atividades previstas no Anexo IV do Decreto 3.048/1999"
+                    if sem_agente
+                    else description or code
+                )
+                date_matches = self._matches_date(item.expected_start_date, esocial_date)
+                intensity_matches = ""
+
+            results.append(EmployeeResult(
+                cpf=item.cpf, nome=item.name,
+                status_consulta="completed",
+                ruido_encontrado=ruido_encontrado,
+                codigo_agente=code,
+                data_planilha=item.expected_start_date,
+                data_esocial=esocial_date,
+                data_confere=date_matches,
+                intensidade_planilha=item.expected_intensity if is_noise else "",
+                intensidade_esocial=intensity,
+                intensidade_confere=intensity_matches,
+                detalhe_observado=detalhe,
+                evidencia_principal=evidence_file,
+                revisao_humana="não",
+            ))
+
+        return results
 
     @staticmethod
     def _first_date(text: str) -> str:
@@ -538,10 +640,27 @@ class ESocialClient:
             print("Data da planilha vazia; usando primeiro evento de condicao ambiental disponivel.", flush=True)
         else:
             print(f"Selecionando evento de condicao ambiental da data: {date}", flush=True)
+        _NO_EVENT_MARKERS = (
+            "nao ha condicoes ambientais",
+            "nenhuma condicao ambiental",
+            "nao ha registros",
+            "nenhum registro",
+            "sem registros",
+            "nao ha condicao ambiental do trabalho",
+            "nao ha condicoes ambientais do trabalho",
+        )
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             self.renew_session_if_prompted()
             self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=8000)
+            # Detecta rapidamente quando a pagina ja confirma que nao ha eventos cadastrados.
+            try:
+                _body_now = normalize_text(self.page.locator("body").inner_text(timeout=3000))
+                if any(marker in _body_now for marker in _NO_EVENT_MARKERS):
+                    print("Pagina confirma que nao ha Condicoes Ambientais cadastradas; encerrando busca.", flush=True)
+                    return ""
+            except Exception:
+                pass
             if not date:
                 row = self.page.locator("tr", has_text=re.compile(r"\b(0[1-9]|[12]\d|3[01])/(0[1-9]|1[0-2])/\d{4}\b")).filter(has=self.page.get_by_role("button", name=re.compile(r"visualizar\s+evento", re.I))).first
             else:
@@ -613,46 +732,125 @@ class ESocialClient:
             self.page.wait_for_timeout(900)
         raise SafetyBlocked("A tabela de Agentes Nocivos nao terminou de carregar; nao vou marcar como sem ruido sem comprovar.")
 
-    def _open_noise_agent_detail_if_present(self) -> bool:
+    def _open_noise_agent_detail_if_present(self) -> list[dict]:
+        """Abre o detalhe de TODOS os agentes nocivos listados e retorna uma lista de dicts.
+
+        Cada dict tem:
+            code        — codigo do agente (ex: "02.01.001", "09.01.001")
+            description — descricao extraida da linha da tabela (ex: "Ruido")
+            is_noise    — True quando code == "02.01.001"
+            intensity   — intensidade lida no modal (so preenchida para agente de ruido 02.01.001)
+            modal_text  — texto completo do modal para auditoria
+
+        A funcao nao lanca excecao quando nao encontra agentes; retorna lista vazia.
+        """
         self.renew_session_if_prompted()
-        deadline = time.monotonic() + 30
-        last_error: Exception | None = None
-        while time.monotonic() < deadline:
-            self._wait_agent_section_ready(timeout_ms=10000)
-            try:
-                body = self.page.locator("body").inner_text(timeout=5000)
-            except Exception as error:
-                last_error = error
-                self.page.wait_for_timeout(800)
-                continue
-            try:
-                if not re.search(r"\b02\.01\.001\b", body):
-                    print("Agente 02.01.001 nao apareceu; registrando como sem agente de ruido.", flush=True)
-                    return False
-                print("Abrindo detalhe do agente nocivo 02.01.001...", flush=True)
-                clicked = self.page.evaluate("""() => {
-                    const rows = Array.from(document.querySelectorAll('tr'));
-                    const row = rows.find(item => (item.innerText || '').includes('02.01.001'));
-                    if (!row) return false;
-                    row.scrollIntoView({block: 'center', inline: 'center'});
-                    const button = row.querySelector('button');
-                    if (!button) return false;
-                    button.click();
-                    return true;
-                }""")
-                if not clicked:
-                    row = self.page.locator("tr", has_text=re.compile(r"02\.01\.001")).first
-                    row.scroll_into_view_if_needed(timeout=2000)
-                    row.locator("button").first.click(timeout=7000)
-                self.page.wait_for_timeout(1200)
-                self._wait_noise_detail_loaded(timeout_ms=30000)
-                return True
-            except PlaywrightTimeoutError as error:
-                last_error = error
-                print("Detalhe do agente 02.01.001 ainda nao abriu; tentando novamente.", flush=True)
-                self.page.wait_for_timeout(1200)
-        print(f"Nao foi possivel abrir o detalhe do agente dentro do tempo esperado: {last_error}", flush=True)
-        return False
+        results: list[dict] = []
+
+        # Conta as linhas com codigo de agente e botao de acao.
+        try:
+            self._wait_agent_section_ready(timeout_ms=15000)
+            agent_rows = self.page.locator("tr").filter(
+                has=self.page.locator("button")
+            ).filter(
+                has=self.page.locator("td", has_text=re.compile(r"\d{2}\.\d{2}\.\d{3}"))
+            )
+            total = agent_rows.count()
+        except Exception as err:
+            print(f"Nao foi possivel contar linhas de agentes: {err}", flush=True)
+            total = 0
+
+        if total == 0:
+            print("Nenhuma linha de agente nocivo encontrada na tabela.", flush=True)
+            return results
+
+        print(f"{total} agente(s) nocivo(s) encontrado(s) na lista; abrindo cada um.", flush=True)
+
+        for index in range(total):
+            self.renew_session_if_prompted()
+            deadline_row = time.monotonic() + 20
+            last_error: Exception | None = None
+            opened = False
+
+            while time.monotonic() < deadline_row:
+                try:
+                    # Re-localiza a cada tentativa pois o DOM pode ser atualizado pelo modal anterior.
+                    rows_now = self.page.locator("tr").filter(
+                        has=self.page.locator("button")
+                    ).filter(
+                        has=self.page.locator("td", has_text=re.compile(r"\d{2}\.\d{2}\.\d{3}"))
+                    )
+                    row = rows_now.nth(index)
+                    if row.count() == 0 or not row.is_visible(timeout=800):
+                        self.page.wait_for_timeout(800)
+                        continue
+
+                    row_text = row.inner_text(timeout=2000)
+                    agent_code_match = re.search(r"\d{2}\.\d{2}\.\d{3}", row_text)
+                    agent_code = agent_code_match.group(0) if agent_code_match else ""
+                    # Descricao: tudo apos o codigo na linha (ex: "02.01.001 - Ruido" → "Ruido")
+                    description = re.sub(r"^\s*\d{2}\.\d{2}\.\d{3}\s*[-–]?\s*", "", row_text).strip()
+                    description = description.splitlines()[0].strip() if description else ""
+                    is_noise = agent_code == "02.01.001"
+
+                    print(f"Abrindo detalhe do agente {agent_code or f'#{index+1}'} ({description or 'sem descricao'})...", flush=True)
+                    row.scroll_into_view_if_needed(timeout=3000)
+                    btn = row.locator("button").first
+                    btn.click(timeout=7000)
+                    self.page.wait_for_timeout(1000)
+                    self._wait_noise_detail_loaded(timeout_ms=30000)
+
+                    modal_text = self.page.locator("body").inner_text(timeout=5000)
+                    modal_norm = normalize_text(modal_text)
+
+                    # Intensidade: so extraida para agente de ruido 02.01.001.
+                    intensity = self._intensity(modal_text) if is_noise else ""
+
+                    # Codigo pode estar so no modal (lista mostra codigo diferente).
+                    if not is_noise and re.search(r"\b02\.01\.001\b", modal_text):
+                        agent_code = "02.01.001"
+                        is_noise = True
+                        intensity = self._intensity(modal_text)
+                        print("Agente 02.01.001 identificado dentro do modal.", flush=True)
+
+                    sem_agente = "nao existe agente nocivo" in modal_norm
+                    print(
+                        f"Agente {agent_code}: {'ruido; intensidade=' + intensity if is_noise else 'sem agente nocivo (decreto 3.048)' if sem_agente else 'outro agente'}.",
+                        flush=True,
+                    )
+
+                    results.append({
+                        "code": agent_code,
+                        "description": description,
+                        "is_noise": is_noise,
+                        "intensity": intensity,
+                        "modal_text": modal_text,
+                        "sem_agente_nocivo": sem_agente,
+                    })
+                    opened = True
+
+                    # Fecha modal voltando para a lista de agentes.
+                    try:
+                        back_btn = self.page.get_by_role("button", name=re.compile(r"voltar", re.I)).first
+                        if back_btn.count() > 0 and back_btn.is_visible(timeout=800):
+                            back_btn.click(timeout=5000)
+                            self.page.wait_for_timeout(800)
+                        else:
+                            self.page.go_back(timeout=10000, wait_until="domcontentloaded")
+                            self.page.wait_for_timeout(800)
+                    except Exception as back_err:
+                        print(f"Aviso ao tentar voltar para lista: {back_err}", flush=True)
+                    break
+
+                except (PlaywrightTimeoutError, SafetyBlocked) as error:
+                    last_error = error
+                    print(f"Detalhe do agente #{index + 1} ainda nao abriu; tentando novamente.", flush=True)
+                    self.page.wait_for_timeout(1200)
+
+            if not opened:
+                print(f"Nao foi possivel abrir o detalhe do agente #{index + 1}: {last_error}", flush=True)
+
+        return results
 
     def _wait_noise_detail_loaded(self, timeout_ms: int = 12000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000

@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: esocial-noise-consultation
+Version: 0.2.0
+Summary: Automação local, auditável e somente leitura para consulta de ruído no eSocial.
+Requires-Python: >=3.11
