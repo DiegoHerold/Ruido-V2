@@ -18,8 +18,12 @@ class SelectorRegistry:
         return self.definitions[key]
 
     def first_visible(self, page: Page, key: str, timeout_ms: int = 15000) -> Locator:
+        return self.resolve(page, key, timeout_ms)[0]
+
+    def resolve(self, page: Page, key: str, timeout_ms: int = 15000) -> tuple[Locator, dict[str, Any]]:
         definition = self.definition(key)
-        for option in [definition.get("primary", {})] + definition.get("fallbacks", []):
+        options = [definition.get("primary", {})] + definition.get("fallbacks", [])
+        for index, option in enumerate(options):
             serialized = json.dumps(option, ensure_ascii=False)
             self.execution.selectors_tried.append(f"{key}:{serialized}")
             if "role" in option:
@@ -38,8 +42,15 @@ class SelectorRegistry:
                 continue
             try:
                 locator.wait_for(state="visible", timeout=timeout_ms)
-                self.execution.event("selector_resolved", selector_key=key, selector=serialized)
-                return locator
+                self.execution.event(
+                    "selector_resolved",
+                    selector_key=key,
+                    selector=serialized,
+                    source="primary" if index == 0 else "declared_fallback",
+                )
+                if index:
+                    self.execution.event("selector_fallback_used", selector_key=key, selector=serialized)
+                return locator, definition
             except PlaywrightTimeoutError:
                 continue
         raise PlaywrightTimeoutError(f"Nenhum seletor visível para {key}")

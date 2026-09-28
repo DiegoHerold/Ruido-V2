@@ -34,7 +34,13 @@ class Settings:
             raise SafetyBlocked("Configuração inválida: apenas modo read_only com bloqueio de escrita é aceito.")
         import json
         selectors = json.loads((root / manifest["selectors"]["file"]).read_text(encoding="utf-8"))
-        required_selectors = {"portal.esocial_access", "login.govbr", "govbr.certificate", "employee.search", "employee.search_submit", "sst.noise_section"}
+        required_selectors = {
+            "portal.esocial_access", "login.govbr", "govbr.certificate", "employee.search",
+            "employee.search_submit", "sst.noise_section", "representation.switch",
+            "representation.profile", "representation.document_pj", "representation.document_pf",
+            "representation.verify_pj", "representation.verify_pf", "representation.sst_module",
+            "representation.continue",
+        }
         if required_selectors - selectors.keys():
             raise SafetyBlocked("Registry de seletores não contém todos os controles obrigatórios.")
         return cls(root, manifest, load_yaml(root / "evidence-policy.yaml"), recovery, selectors)

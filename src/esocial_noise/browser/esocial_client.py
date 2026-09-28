@@ -7,7 +7,7 @@ from typing import Any
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from ..contracts import EmployeeInput, EmployeeResult, SafetyBlocked
+from ..contracts import EmployeeInput, EmployeeResult, RepresentationContextNotConfirmed, SafetyBlocked
 from ..runtime.artifacts import BrowserEvidence
 from ..runtime.execution import ExecutionContext
 from ..safety.policy import ReadOnlyPolicy
@@ -102,21 +102,65 @@ class ESocialClient:
         self.execution.event("session_renewal_confirmed", evidence=after)
         return True
 
-    def return_to_worker_management(self, represented_document: str) -> None:
+    def return_to_worker_management(self, item: EmployeeInput) -> None:
         """Retorna ao ponto de busca sem relogar nem trocar o contexto jÃ¡ validado."""
+        represented_document = item.represented_document
         self.execution.current_step = "employee_search_started"
         self._close_open_dialogs()
         before = self.evidence.capture(self.page, "before_return_to_worker_management", include_dom=False)
         self.execution.event("action_started", action="navigate:sst_worker_management", evidence=before)
         self.page.goto(self.sst_workers_url, wait_until="domcontentloaded", timeout=30000)
-        self.page.wait_for_timeout(1000)
-        text = self.page.locator("body").inner_text(timeout=5000)
-        document_visible = represented_document in "".join(filter(str.isdigit, text))
-        page_ready = "gestao de trabalhadores" in normalize_text(text) or "empregados" in normalize_text(text)
+        # O frontend do SST termina de montar o cabeÃ§alho (onde fica o CNPJ/CPF
+        # representado) depois do DOMContentLoaded. Uma leitura Ãºnica logo apÃ³s
+        # a navegaÃ§Ã£o criava falsos bloqueios em retornos mais lentos.
+        deadline = time.monotonic() + 15
+        text = ""
+        document_visible = False
+        page_ready = False
+        while time.monotonic() < deadline:
+            try:
+                text = self.page.locator("body").inner_text(timeout=1500)
+            except PlaywrightTimeoutError:
+                text = ""
+            digits = "".join(filter(str.isdigit, text))
+            normalized = normalize_text(text)
+            document_visible = represented_document in digits
+            page_ready = (
+                "gestao de trabalhadores" in normalized
+                or "gestao de empregados" in normalized
+            ) and "cpf completo" in normalized
+            if page_ready and document_visible:
+                break
+            self.page.wait_for_timeout(250)
         after = self.evidence.capture(self.page, "after_return_to_worker_management", include_dom=False)
         self.execution.event("action_completed", action="navigate:sst_worker_management", evidence=after)
         if not page_ready or not document_visible:
-            raise SafetyBlocked("O retorno Ã  GestÃ£o de Trabalhadores nÃ£o comprovou o mesmo CNPJ/CPF representado.")
+            self.execution.checkpoint(
+                "represented_context_after_return",
+                "suspicious",
+                {"document": represented_document},
+                {"page_ready": page_ready, "document_visible": document_visible, "url": self.page.url},
+                after,
+            )
+            raise RepresentationContextNotConfirmed("O retorno Ã  GestÃ£o de Trabalhadores nÃ£o comprovou o mesmo CNPJ/CPF representado.")
+
+    def retry_representation_context(self, item: EmployeeInput, attempt: int, reason: str) -> None:
+        """Executa a recuperacao; a autorizacao e limite pertencem ao main."""
+        before = self.evidence.capture(self.page, "before_retry_representation_context", include_dom=False)
+        self.execution.event(
+            "represented_context_recovery_started",
+            reason=reason,
+            document=item.represented_document,
+            type=item.representation_type,
+            attempt=attempt,
+            previous_url=self.page.url,
+            evidence=before,
+        )
+        self.page.goto("https://www.esocial.gov.br/portal/Home/Inicial", wait_until="domcontentloaded", timeout=30000)
+        self.switch_representation(item)
+        self.return_to_worker_management(item)
+        after = self.evidence.capture(self.page, "after_retry_representation_context", include_dom=False)
+        self.execution.event("represented_context_recovery_completed", attempt=attempt, outcome="context_confirmed", evidence=after)
 
     def switch_representation(self, item: EmployeeInput) -> None:
         """Troca perfil por procuracao usando o Perfil + CNPJ/CPF da planilha."""
@@ -133,56 +177,45 @@ class ESocialClient:
         self.execution.event("action_started", action="switch_representation", document=document, type=item.representation_type, evidence=before)
 
         if "trocarPerfil=true" not in self.page.url:
-            self._click_any([
-                self.page.get_by_text(re.compile(r"trocar\s+perfil", re.I)).first,
-                self.page.locator("a", has_text=re.compile(r"trocar\s+perfil", re.I)).first,
-                self.page.locator("button", has_text=re.compile(r"trocar\s+perfil", re.I)).first,
-            ], "Trocar Perfil/Modulo")
-            self.page.wait_for_timeout(800)
+            self.click("representation.switch", wait_for_validation=False)
+            self._wait_for_any_text(
+                ("selecione o seu perfil", "procurador de pessoa juridica", "procurador de pessoa fisica"),
+                "troca de perfil",
+            )
             self.assert_session_active()
 
         profile_value = "PROCURADOR_PJ" if item.representation_type == "pessoa_juridica" else "PROCURADOR_PF"
-        document_field = "#procuradorCnpj" if item.representation_type == "pessoa_juridica" else "#procuradorCpf"
-        verify_button = "#btn-verificar-procuracao-cnpj" if item.representation_type == "pessoa_juridica" else "#btn-verificar-procuracao-cpf"
+        document_key = "representation.document_pj" if item.representation_type == "pessoa_juridica" else "representation.document_pf"
+        verify_key = "representation.verify_pj" if item.representation_type == "pessoa_juridica" else "representation.verify_pf"
 
         print(f"Selecionando perfil: {profile_value}", flush=True)
-        self.page.locator("#perfilAcesso").select_option(profile_value)
-        self.page.wait_for_timeout(800)
+        self.select_option("representation.profile", profile_value)
         self.assert_session_active()
-        self.page.locator(document_field).wait_for(state="visible", timeout=10000)
 
         print(f"Preenchendo {label} representado: {typed_document}", flush=True)
-        field = self.page.locator(document_field)
-        self._type_masked_document(field, typed_document, document, label)
+        field = self.type_document(document_key, typed_document, document, label)
         filled_value = "".join(filter(str.isdigit, field.input_value(timeout=3000)))
         if filled_value != document:
             raise SafetyBlocked(f"O campo de {label} nao manteve o documento preenchido antes do Verificar.")
 
         print("Verificando procuracao...", flush=True)
-        verifier = self.page.locator(verify_button)
-        verifier.wait_for(state="visible", timeout=10000)
-        verifier.click(timeout=5000)
+        self.click(verify_key, wait_for_validation=False)
         self._wait_for_sst_module_after_verify()
         self.assert_session_active()
 
         print("Selecionando modulo SST...", flush=True)
         self._select_sst_module()
-        self.page.wait_for_timeout(1500)
         self.assert_session_active()
 
         if not self._is_sst_frontend_loaded():
             print("Continuando com perfil por procuracao...", flush=True)
-            continue_button = self.page.locator("#btnProcuracao")
-            if continue_button.count() > 0:
-                try:
-                    continue_button.click(timeout=5000)
-                except PlaywrightTimeoutError:
-                    print("Clique normal em Continuar falhou; tentando clique via JavaScript.", flush=True)
-                    continue_button.evaluate("element => element.click()")
-                self.page.wait_for_timeout(1800)
-                self.assert_session_active()
-            else:
+            try:
+                self.click("representation.continue", wait_for_validation=False)
+                self._wait_for_sst_frontend()
+            except PlaywrightTimeoutError:
                 print("Botao Continuar nao apareceu; o clique no SST ja levou ao modulo.", flush=True)
+            else:
+                self.assert_session_active()
 
         body = self.page.locator("body").inner_text(timeout=5000)
         valid = document in "".join(filter(str.isdigit, body)) or "frontend.esocial.gov.br" in self.page.url.casefold() or "sst" in self.page.url.casefold()
@@ -220,7 +253,8 @@ class ESocialClient:
                 except Exception:
                     return
 
-    def _ensure_worker_search_ready(self, represented_document: str) -> None:
+    def _ensure_worker_search_ready(self, item: EmployeeInput) -> None:
+        represented_document = item.represented_document
         self._close_open_dialogs()
         try:
             text = self.page.locator("body").inner_text(timeout=4000)
@@ -236,20 +270,22 @@ class ESocialClient:
         if ready:
             return
         print("Tela de busca de CPF nao estava pronta; retornando para Gestao de Empregados.", flush=True)
-        self.return_to_worker_management(represented_document)
+        self.return_to_worker_management(item)
 
     def _is_sst_frontend_loaded(self) -> bool:
         current_url = self.page.url.casefold()
-        if "frontend.esocial.gov.br/sst" in current_url:
-            return True
         try:
             normalized = normalize_text(self.page.locator("body").inner_text(timeout=3000))
         except Exception:
             return False
         return (
-            "modulo simplificado saude e seguranca do trabalho" in normalized
-            or "gestao de empregados" in normalized
-            or "gestao de trabalhadores" in normalized
+            "frontend.esocial.gov.br/sst" in current_url
+            and not any(marker in normalized for marker in GENERIC_LOADING_MARKERS)
+            and (
+                "modulo simplificado saude e seguranca do trabalho" in normalized
+                or "gestao de empregados" in normalized
+                or "gestao de trabalhadores" in normalized
+            )
         )
 
     def select_company(self, company: str, company_cnpj: str | None) -> None:
@@ -277,7 +313,7 @@ class ESocialClient:
         self.execution.current_cpf, self.execution.current_step = item.cpf, "employee_search_started"
         print(f"Consultando CPF linha {item.source_row}: {mask_cpf(item.cpf)}", flush=True)
         self.renew_session_if_prompted()
-        self._ensure_worker_search_ready(item.represented_document)
+        self._ensure_worker_search_ready(item)
         start = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_search_start", include_dom=False)
         self.execution.checkpoint("employee_search_started", "ok", {"cpf": mask_cpf(item.cpf)}, {"source_row": item.source_row, "source_name": item.name}, start)
         field = self.selectors.first_visible(self.page, "employee.search")
@@ -303,6 +339,7 @@ class ESocialClient:
         self.click("sst.noise_section")
         self.page.wait_for_timeout(900)
         self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=30000)
+<<<<<<< HEAD
         _NO_EVENT_MARKERS_INSPECT = (
             "nao ha condicoes ambientais",
             "nenhuma condicao ambiental",
@@ -327,6 +364,26 @@ class ESocialClient:
                 detalhe_observado="Não há Condições Ambientais do Trabalho registradas no eSocial.",
                 evidencia_principal="", revisao_humana="não",
             )]
+=======
+        if self._has_no_environmental_conditions_registered():
+            print("Trabalhador sem Condicoes Ambientais registradas; registrando sem agente de ruido.", flush=True)
+            checked = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_no_environmental_conditions", include_dom=False)
+            self.execution.checkpoint(
+                "noise_information_checked",
+                "ok",
+                {"section": "SST/noise", "agent_code": "02.01.001"},
+                {"noise": "não", "reason": "no_environmental_conditions_registered"},
+                checked,
+            )
+            return EmployeeResult(
+                cpf=item.cpf, nome=item.name,
+                status_consulta="completed", ruido_encontrado="não",
+                data_planilha=item.expected_start_date, data_esocial="", data_confere="",
+                intensidade_planilha=item.expected_intensity, intensidade_esocial="", intensidade_confere="",
+                detalhe_observado="Não há Condições Ambientais do Trabalho - Agentes Nocivos registradas para o trabalhador; Não há Agente de Ruído",
+                evidencia_principal=checked[-1], revisao_humana="não",
+            )
+>>>>>>> 498d5ed879e8d7fd574c24db15ca5a5af0990f28
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
@@ -510,20 +567,86 @@ class ESocialClient:
             return document
         return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
 
-    def click(self, selector_key: str) -> None:
+    def _wait_for_text(self, expected: tuple[str, ...], context: str, timeout_ms: int = 10000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                body = normalize_text(self.page.locator("body").inner_text(timeout=1500))
+                if all(value in body for value in expected):
+                    return
+            except PlaywrightTimeoutError:
+                pass
+            self.page.wait_for_timeout(200)
+        raise PlaywrightTimeoutError(f"Nao observei o estado esperado apos {context}: {expected}")
+
+    def _wait_for_any_text(self, expected: tuple[str, ...], context: str, timeout_ms: int = 10000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                body = normalize_text(self.page.locator("body").inner_text(timeout=1500))
+                if any(value in body for value in expected):
+                    return
+            except PlaywrightTimeoutError:
+                pass
+            self.page.wait_for_timeout(200)
+        raise PlaywrightTimeoutError(f"Nao observei nenhum estado esperado apos {context}: {expected}")
+
+    def _wait_for_sst_frontend(self, timeout_ms: int = 15000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if self._is_sst_frontend_loaded():
+                return
+            self.page.wait_for_timeout(250)
+        raise PlaywrightTimeoutError("Modulo SST nao ficou disponivel apos a acao.")
+
+    def _record_action(self, action: str, selector_key: str, operation, wait_for_validation: bool = True) -> Any:
+        """Executa acoes relevantes com politica, evidencias e validacao observavel."""
         self.renew_session_if_prompted()
         print(f"Resolvendo seletor: {selector_key}", flush=True)
-        definition = self.selectors.definition(selector_key)
-        locator = self.selectors.first_visible(self.page, selector_key)
-        self.policy.assert_target_allowed(locator.inner_text(timeout=3000), definition)
-        self.execution.last_action = f"click:{selector_key}"
-        print(f"Clicando: {selector_key}", flush=True)
-        before = self.evidence.capture(self.page, f"before_{selector_key}", include_dom=False)
-        self.execution.event("action_started", action=self.execution.last_action, evidence=before)
-        locator.click(timeout=15000)
-        self.page.wait_for_timeout(500)
-        after = self.evidence.capture(self.page, f"after_{selector_key}", include_dom=False)
-        self.execution.event("action_completed", action=self.execution.last_action, evidence=after)
+        locator, definition = self.selectors.resolve(self.page, selector_key)
+        target_text = locator.inner_text(timeout=3000) if definition.get("kind") != "textbox" else selector_key
+        self.policy.assert_target_allowed(target_text, definition)
+        self.execution.last_action = f"{action}:{selector_key}"
+        before = self.evidence.capture(self.page, f"before_{action}_{selector_key}", include_dom=False)
+        self.execution.event("action_started", action=self.execution.last_action, selector_key=selector_key, evidence=before)
+        operation(locator)
+        if wait_for_validation:
+            validation = definition.get("validation", {})
+            values = tuple(normalize_text(value) for value in validation.get("visible_text_any", []))
+            if values:
+                deadline = time.monotonic() + 10000 / 1000
+                validated = False
+                while time.monotonic() < deadline:
+                    body = normalize_text(self.page.locator("body").inner_text(timeout=1500))
+                    # O eSocial alterna entre "Agente nocivo" e "Agentes
+                    # Nocivos" no titulo da mesma tela.
+                    if any(value in body for value in values) or (
+                        "agente nocivo" in values and "agentes nocivos" in body
+                    ):
+                        validated = True
+                        break
+                    self.page.wait_for_timeout(200)
+                if not validated:
+                    raise PlaywrightTimeoutError(f"Acao {selector_key} nao produziu a validacao declarada.")
+        after = self.evidence.capture(self.page, f"after_{action}_{selector_key}", include_dom=False)
+        self.execution.event("action_completed", action=self.execution.last_action, selector_key=selector_key, evidence=after)
+        return locator
+
+    def click(self, selector_key: str, wait_for_validation: bool = True) -> None:
+        self._record_action("click", selector_key, lambda locator: locator.click(timeout=15000), wait_for_validation)
+
+    def select_option(self, selector_key: str, value: str) -> None:
+        self._record_action("select_option", selector_key, lambda locator: locator.select_option(value), wait_for_validation=False)
+
+    def type_document(self, selector_key: str, value_to_type: str, expected_digits: str, label: str):
+        locator, definition = self.selectors.resolve(self.page, selector_key)
+        self.policy.assert_target_allowed(selector_key, definition)
+        before = self.evidence.capture(self.page, f"before_type_{selector_key}", include_dom=False)
+        self.execution.event("action_started", action=f"type:{selector_key}", selector_key=selector_key, evidence=before)
+        self._type_masked_document(locator, value_to_type, expected_digits, label)
+        after = self.evidence.capture(self.page, f"after_type_{selector_key}", include_dom=False)
+        self.execution.event("action_completed", action=f"type:{selector_key}", selector_key=selector_key, evidence=after)
+        return locator
 
     def _select_employee_autocomplete(self, item: EmployeeInput) -> None:
         typed_cpf = self._format_cpf(item.cpf)
@@ -611,6 +734,16 @@ class ESocialClient:
             print(f"Aguardando {context} carregar...", flush=True)
             self.page.wait_for_timeout(800)
         raise SafetyBlocked(f"{context} nao terminou de carregar dentro do tempo esperado.")
+
+    def _has_no_environmental_conditions_registered(self) -> bool:
+        try:
+            body = normalize_text(self.page.locator("body").inner_text(timeout=3000))
+        except Exception:
+            return False
+        return (
+            "nao ha condicoes ambientais do trabalho" in body
+            and "agentes nocivos registradas para o(a) trabalhador(a)" in body
+        )
 
     def _type_masked_document(self, field: Any, value_to_type: str, expected_digits: str, label: str) -> None:
         """Digita em campos mascarados/autocomplete sem usar fill(), que pode ser limpo pelo React."""
@@ -745,6 +878,7 @@ class ESocialClient:
         A funcao nao lanca excecao quando nao encontra agentes; retorna lista vazia.
         """
         self.renew_session_if_prompted()
+<<<<<<< HEAD
         results: list[dict] = []
 
         # Conta as linhas com codigo de agente e botao de acao.
@@ -851,6 +985,43 @@ class ESocialClient:
                 print(f"Nao foi possivel abrir o detalhe do agente #{index + 1}: {last_error}", flush=True)
 
         return results
+=======
+        deadline = time.monotonic() + 30
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            self._wait_agent_section_ready(timeout_ms=10000)
+            try:
+                body = self.page.locator("body").inner_text(timeout=5000)
+            except Exception as error:
+                last_error = error
+                self.page.wait_for_timeout(800)
+                continue
+            try:
+                if not re.search(r"\b02\.01\.001\b", body):
+                    print("Agente 02.01.001 nao apareceu; registrando como sem agente de ruido.", flush=True)
+                    return False
+                print("Abrindo detalhe do agente nocivo 02.01.001...", flush=True)
+                row = self.page.locator("tr", has_text=re.compile(r"02\.01\.001")).first
+                row.wait_for(state="visible", timeout=5000)
+                row.scroll_into_view_if_needed(timeout=2000)
+                selector = self.selectors.definition("sst.noxious_agent_view")["primary"]["css"]
+                agent_button = row.locator(selector).first
+                self.policy.assert_target_allowed(agent_button.get_attribute("aria-label") or "visualizar item", self.selectors.definition("sst.noxious_agent_view"))
+                before = self.evidence.capture(self.page, "before_click_sst.noxious_agent_view", include_dom=False)
+                self.execution.event("action_started", action="click:sst.noxious_agent_view", evidence=before)
+                agent_button.click(timeout=7000)
+                after = self.evidence.capture(self.page, "after_click_sst.noxious_agent_view", include_dom=False)
+                self.execution.event("action_completed", action="click:sst.noxious_agent_view", evidence=after)
+                self.page.wait_for_timeout(1200)
+                self._wait_noise_detail_loaded(timeout_ms=30000)
+                return True
+            except PlaywrightTimeoutError as error:
+                last_error = error
+                print("Detalhe do agente 02.01.001 ainda nao abriu; tentando novamente.", flush=True)
+                self.page.wait_for_timeout(1200)
+        print(f"Nao foi possivel abrir o detalhe do agente dentro do tempo esperado: {last_error}", flush=True)
+        return False
+>>>>>>> 498d5ed879e8d7fd574c24db15ca5a5af0990f28
 
     def _wait_noise_detail_loaded(self, timeout_ms: int = 12000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
@@ -890,31 +1061,21 @@ class ESocialClient:
         raise PlaywrightTimeoutError(f"Nao encontrei elemento visivel para {description}: {last_error}")
 
     def _select_sst_module(self) -> None:
-        module = self.page.locator("#sst")
-        if module.count() != 1:
-            raise PlaywrightTimeoutError("Modulo SST nao encontrado pelo id #sst.")
-        state = module.evaluate("""element => ({
-            display: getComputedStyle(element).display,
-            visibility: getComputedStyle(element).visibility,
-            opacity: getComputedStyle(element).opacity,
-            rect: element.getBoundingClientRect().toJSON ? element.getBoundingClientRect().toJSON() : {
-                x: element.getBoundingClientRect().x,
-                y: element.getBoundingClientRect().y,
-                width: element.getBoundingClientRect().width,
-                height: element.getBoundingClientRect().height
-            }
-        })""")
-        print(f"Estado do modulo SST: {state}", flush=True)
         try:
-            module.scroll_into_view_if_needed(timeout=2000)
-            module.click(timeout=3000)
+            self.click("representation.sst_module", wait_for_validation=False)
+            self._wait_for_sst_frontend()
             return
         except PlaywrightTimeoutError:
-            print("Clique normal no modulo SST falhou; tentando clique via JavaScript.", flush=True)
-        module.evaluate("""element => {
-            element.scrollIntoView({block: 'center', inline: 'center'});
-            element.click();
-        }""")
+            # Fallback excepcional e auditado para o botao SST que o portal por
+            # vezes mantem com overlay apesar de visivel no DOM.
+            locator, definition = self.selectors.resolve(self.page, "representation.sst_module", timeout_ms=3000)
+            self.policy.assert_target_allowed(locator.inner_text(timeout=3000), definition)
+            before = self.evidence.capture(self.page, "before_javascript_click_representation.sst_module", include_dom=False)
+            self.execution.event("javascript_click_fallback_used", selector_key="representation.sst_module", reason="normal_click_timed_out", evidence=before)
+            locator.evaluate("element => { element.scrollIntoView({block: 'center', inline: 'center'}); element.click(); }")
+            self._wait_for_sst_frontend()
+            after = self.evidence.capture(self.page, "after_javascript_click_representation.sst_module", include_dom=False)
+            self.execution.event("action_completed", action="javascript_click:representation.sst_module", selector_key="representation.sst_module", evidence=after)
 
     def _wait_for_sst_module_after_verify(self, timeout_ms: int = 15000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
@@ -925,7 +1086,7 @@ class ESocialClient:
                 body = self.page.locator("body").inner_text(timeout=2000)
                 last_body = body
                 normalized = normalize_text(body)
-                module = self.page.locator("#sst")
+                module = self.selectors.first_visible(self.page, "representation.sst_module", timeout_ms=300)
                 if module.count() == 1 and (
                     "selecione o modulo" in normalized
                     or "seguranca e saude no trabalho" in normalized

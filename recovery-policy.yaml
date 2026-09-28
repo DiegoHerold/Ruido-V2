@@ -13,6 +13,17 @@ allowed_auto_recovery:
   - capture_more_evidence
   - create_candidate_selector_patch
   - select_exact_certificate_by_ocr
+  - retry_representation_context
+recovery_contracts:
+  retry_representation_context:
+    trigger: represented_document_not_confirmed_after_worker_management_return
+    max_attempts_per_context: 1
+    action: return_to_portal_home_and_revalidate_representation
+    required_validation:
+      - worker_management_screen_ready
+      - cpf_search_available
+      - represented_document_visible
+    on_exhaustion: human_review
 requires_human:
   - certificate_not_uniquely_identified
   - captcha_or_mfa
