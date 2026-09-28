@@ -385,10 +385,7 @@ def run(argv: list[str] | None = None) -> int:
                     state.record(rows[-1], context_trusted=False)
                     continue
                 try:
-<<<<<<< HEAD
                     result_list = client.inspect_employee(employee)
-=======
-                    result = client.inspect_employee(employee)
                 except RepresentationContextNotConfirmed as error:
                     context_key = (employee.representation_type, employee.represented_document)
                     attempt = representation_recovery_attempts.get(context_key, 0)
@@ -401,8 +398,7 @@ def run(argv: list[str] | None = None) -> int:
                     except RepresentationContextNotConfirmed as retry_error:
                         execution.event("represented_context_recovery_exhausted", "error", attempt=attempt, error=str(retry_error))
                         raise SafetyBlocked("A segunda validacao do contexto de procuracao falhou; revisao humana necessaria.") from retry_error
-                    result = client.inspect_employee(employee)
->>>>>>> 498d5ed879e8d7fd574c24db15ca5a5af0990f28
+                    result_list = client.inspect_employee(employee)
                 except Exception as error:
                     bundle = collect_failure(page, execution, evidence, error, root)
                     bundle["knowledge"] = find_hypotheses(root, execution)

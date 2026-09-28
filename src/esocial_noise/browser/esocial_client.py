@@ -339,32 +339,6 @@ class ESocialClient:
         self.click("sst.noise_section")
         self.page.wait_for_timeout(900)
         self._wait_while_generic_loading("lista de eventos de condicoes ambientais", timeout_ms=30000)
-<<<<<<< HEAD
-        _NO_EVENT_MARKERS_INSPECT = (
-            "nao ha condicoes ambientais",
-            "nenhuma condicao ambiental",
-            "nao ha registros",
-            "nenhum registro",
-            "sem registros",
-            "nao ha condicao ambiental do trabalho",
-            "nao ha condicoes ambientais do trabalho",
-        )
-        try:
-            _page_body_now = normalize_text(self.page.locator("body").inner_text(timeout=3000))
-            _no_events_confirmed = any(m in _page_body_now for m in _NO_EVENT_MARKERS_INSPECT)
-        except Exception:
-            _no_events_confirmed = False
-        if _no_events_confirmed:
-            print("Pagina confirma ausencia de Condicoes Ambientais; registrando como sem agente nocivo.", flush=True)
-            self.execution.checkpoint("noise_information_checked", "ok", {"section": "SST/noise"}, {"noise": "não"}, [])
-            return [EmployeeResult(
-                cpf=item.cpf, nome=item.name,
-                status_consulta="completed", ruido_encontrado="não",
-                data_planilha=item.expected_start_date, intensidade_planilha=item.expected_intensity,
-                detalhe_observado="Não há Condições Ambientais do Trabalho registradas no eSocial.",
-                evidencia_principal="", revisao_humana="não",
-            )]
-=======
         if self._has_no_environmental_conditions_registered():
             print("Trabalhador sem Condicoes Ambientais registradas; registrando sem agente de ruido.", flush=True)
             checked = self.evidence.capture(self.page, f"employee_{item.cpf[-4:]}_no_environmental_conditions", include_dom=False)
@@ -383,7 +357,6 @@ class ESocialClient:
                 detalhe_observado="Não há Condições Ambientais do Trabalho - Agentes Nocivos registradas para o trabalhador; Não há Agente de Ruído",
                 evidencia_principal=checked[-1], revisao_humana="não",
             )
->>>>>>> 498d5ed879e8d7fd574c24db15ca5a5af0990f28
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
@@ -878,7 +851,6 @@ class ESocialClient:
         A funcao nao lanca excecao quando nao encontra agentes; retorna lista vazia.
         """
         self.renew_session_if_prompted()
-<<<<<<< HEAD
         results: list[dict] = []
 
         # Conta as linhas com codigo de agente e botao de acao.
@@ -985,43 +957,6 @@ class ESocialClient:
                 print(f"Nao foi possivel abrir o detalhe do agente #{index + 1}: {last_error}", flush=True)
 
         return results
-=======
-        deadline = time.monotonic() + 30
-        last_error: Exception | None = None
-        while time.monotonic() < deadline:
-            self._wait_agent_section_ready(timeout_ms=10000)
-            try:
-                body = self.page.locator("body").inner_text(timeout=5000)
-            except Exception as error:
-                last_error = error
-                self.page.wait_for_timeout(800)
-                continue
-            try:
-                if not re.search(r"\b02\.01\.001\b", body):
-                    print("Agente 02.01.001 nao apareceu; registrando como sem agente de ruido.", flush=True)
-                    return False
-                print("Abrindo detalhe do agente nocivo 02.01.001...", flush=True)
-                row = self.page.locator("tr", has_text=re.compile(r"02\.01\.001")).first
-                row.wait_for(state="visible", timeout=5000)
-                row.scroll_into_view_if_needed(timeout=2000)
-                selector = self.selectors.definition("sst.noxious_agent_view")["primary"]["css"]
-                agent_button = row.locator(selector).first
-                self.policy.assert_target_allowed(agent_button.get_attribute("aria-label") or "visualizar item", self.selectors.definition("sst.noxious_agent_view"))
-                before = self.evidence.capture(self.page, "before_click_sst.noxious_agent_view", include_dom=False)
-                self.execution.event("action_started", action="click:sst.noxious_agent_view", evidence=before)
-                agent_button.click(timeout=7000)
-                after = self.evidence.capture(self.page, "after_click_sst.noxious_agent_view", include_dom=False)
-                self.execution.event("action_completed", action="click:sst.noxious_agent_view", evidence=after)
-                self.page.wait_for_timeout(1200)
-                self._wait_noise_detail_loaded(timeout_ms=30000)
-                return True
-            except PlaywrightTimeoutError as error:
-                last_error = error
-                print("Detalhe do agente 02.01.001 ainda nao abriu; tentando novamente.", flush=True)
-                self.page.wait_for_timeout(1200)
-        print(f"Nao foi possivel abrir o detalhe do agente dentro do tempo esperado: {last_error}", flush=True)
-        return False
->>>>>>> 498d5ed879e8d7fd574c24db15ca5a5af0990f28
 
     def _wait_noise_detail_loaded(self, timeout_ms: int = 12000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
