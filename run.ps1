@@ -91,8 +91,10 @@ if ($SyncChromeProfile) {
 if ($InstallDeps) {
     & $Python -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & $Python -m playwright install chrome
+    & $Python -m playwright install chromium
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host "Dependencias instaladas com sucesso!" -ForegroundColor Green
+    exit 0
 }
 
 if ($Test) {

@@ -349,14 +349,14 @@ class ESocialClient:
                 {"noise": "não", "reason": "no_environmental_conditions_registered"},
                 checked,
             )
-            return EmployeeResult(
+            return [EmployeeResult(
                 cpf=item.cpf, nome=item.name,
                 status_consulta="completed", ruido_encontrado="não",
                 data_planilha=item.expected_start_date, data_esocial="", data_confere="",
                 intensidade_planilha=item.expected_intensity, intensidade_esocial="", intensidade_confere="",
                 detalhe_observado="Não há Condições Ambientais do Trabalho - Agentes Nocivos registradas para o trabalhador; Não há Agente de Ruído",
                 evidencia_principal=checked[-1], revisao_humana="não",
-            )
+            )]
         event_date = self._open_exposure_event_for_date(item.expected_start_date)
         if not event_date:
             print("Data da planilha nao localizada na lista; abrindo primeiro evento disponivel.", flush=True)
